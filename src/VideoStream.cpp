@@ -938,11 +938,25 @@ void VideoStream::setStreamingEnabled(bool enabled)
     d->streamingEnabled = enabled;
     for (const auto &stream : d->streams) {
         if (stream->encodedStream) {
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+            // stop() closes the PipeWire fd of the stream, it can't be started
+            // again afterwards. Pausing keeps the stream alive.
+            if (enabled && stream->nodeId != 0) {
+                if (stream->encodedStream->state() == PipeWireBaseEncodedStream::Paused) {
+                    stream->encodedStream->resume();
+                } else {
+                    stream->encodedStream->start();
+                }
+            } else {
+                stream->encodedStream->pause();
+            }
+#else
             if (enabled && stream->nodeId != 0) {
                 stream->encodedStream->start();
             } else {
                 stream->encodedStream->stop();
             }
+#endif
         }
         if (stream->sourceStream) {
             stream->sourceStream->setActive(enabled && stream->nodeId != 0);
