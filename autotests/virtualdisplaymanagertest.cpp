@@ -41,9 +41,6 @@ public:
     void sendEvent(const std::shared_ptr<QEvent> &) override
     {
     }
-    void setClipboardData(std::unique_ptr<QMimeData>) override
-    {
-    }
     QString virtualOutputName() const override
     {
         return m_outputName;
