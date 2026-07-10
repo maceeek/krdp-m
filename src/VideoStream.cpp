@@ -1452,8 +1452,6 @@ void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface
         return;
     }
 
-    d->session->networkDetection()->startBandwidthMeasure();
-
     auto frameId = d->frameId++;
 
     {
@@ -1520,7 +1518,6 @@ void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface
             ++d->sentKeyFrames;
         }
     }
-    d->session->networkDetection()->stopBandwidthMeasure();
 }
 
 void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &surface)
@@ -1568,8 +1565,6 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
         return;
     }
 
-    d->session->networkDetection()->startBandwidthMeasure();
-
     auto frameId = d->frameId++;
 
     {
@@ -1611,7 +1606,6 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
         unregisterFrame(frameId);
     }
 
-    d->session->networkDetection()->stopBandwidthMeasure();
     region16_uninit(&*invalidRegion);
 }
 
