@@ -710,15 +710,14 @@ bool RdpConnection::onPostConnect()
     d->samFile.remove();
 
     rdpSettings *settings = d->peer->context->settings;
-
-    if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
-        return false;
-    }
-
     const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username));
-    const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
 
     if (d->server->usePAMAuthentication()) {
+        if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
+            return false;
+        }
+
+        const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
         qCDebug(KRDP) << "Attempting authenticating user with PAM";
         if (username == KUser().loginName() || KUser().loginName() == QStringLiteral("plasmalogin")) {
             if (pamAuthenticate(username, password) >= 0) {
@@ -726,20 +725,27 @@ bool RdpConnection::onPostConnect()
                 return true;
             }
         }
-    }
-
-    const auto users = d->server->users();
-    for (auto user : users) {
-        if (user.password.isEmpty()) {
-            continue;
+        const auto users = d->server->users();
+        for (auto user : users) {
+            if (user.password.isEmpty()) {
+                continue;
+            }
+            if (user.name == username && user.password == password) {
+                qCDebug(KRDP) << "User" << username << "authenticated successfully";
+                return true;
+            }
         }
-        if (user.name == username && user.password == password) {
-            qCDebug(KRDP) << "User" << username << "authenticated successfully";
-            return true;
+        return false;
+    } else {
+        // In the NLA case the user has been authorised against the SAM database.
+        // FreeRDP only leaves the security protocol enabled that was negotiated,
+        // make sure that the client did not get here without NLA.
+        if (!freerdp_settings_get_bool(settings, FreeRDP_NlaSecurity) && !freerdp_settings_get_bool(settings, FreeRDP_ExtSecurity)) {
+            qCWarning(KRDP) << "Rejecting a client that was not authenticated with NLA";
+            return false;
         }
+        return true;
     }
-
-    return false;
 }
 
 bool RdpConnection::onClose()
