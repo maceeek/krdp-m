@@ -156,15 +156,15 @@ public:
     Server *server = nullptr;
 
     Screencasting m_screencasting;
-    ScreencastingStream *request = nullptr;
-    FakeInput *remoteInterface = nullptr;
+    std::unique_ptr<ScreencastingStream> request;
+    std::unique_ptr<FakeInput> remoteInterface;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     : AbstractSession()
     , d(std::make_unique<Private>())
 {
-    d->remoteInterface = new FakeInput();
+    d->remoteInterface = std::make_unique<FakeInput>();
     d->remoteInterface->authenticate(QStringLiteral("krdpserver"), QString());
 }
 
@@ -182,24 +182,24 @@ bool PlasmaScreencastV1Session::isAvailable()
 void PlasmaScreencastV1Session::start()
 {
     if (auto vm = virtualMonitor()) {
-        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
+        d->request.reset(d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata));
     } else if (const auto streamIndex = activeStream()) {
         if (*streamIndex >= qApp->screens().size()) {
             qCWarning(KRDP) << "Invalid monitor index" << *streamIndex;
             return;
         }
         auto screen = qApp->screens().at(*streamIndex);
-        d->request = d->m_screencasting.createOutputStream(screen, Screencasting::Metadata);
+        d->request.reset(d->m_screencasting.createOutputStream(screen, Screencasting::Metadata));
     } else {
-        d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+        d->request.reset(d->m_screencasting.createWorkspaceStream(Screencasting::Metadata));
     }
     if (!d->request) {
         qCWarning(KRDP) << "Could not create a Plasma screencast stream";
         QMetaObject::invokeMethod(this, &PlasmaScreencastV1Session::error, Qt::QueuedConnection);
         return;
     }
-    connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
-    connect(d->request, &ScreencastingStream::created, this, [this](uint nodeId) {
+    connect(d->request.get(), &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
+    connect(d->request.get(), &ScreencastingStream::created, this, [this](uint nodeId) {
         qCDebug(KRDP) << "Started Plasma session";
 
         if (auto vm = virtualMonitor(); vm && vm->dpr > 0) {
