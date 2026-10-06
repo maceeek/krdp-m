@@ -290,6 +290,8 @@ public:
 
     QQueue<VideoFrame> frameQueue;
     QHash<uint32_t, clk::steady_clock::time_point> pendingFrames;
+    // The client does not acknowledge frames for now, guarded by pendingFramesMutex.
+    bool frameAcknowledgementSuspended = false;
 
     std::mutex pendingFramesMutex;
 
@@ -819,6 +821,7 @@ void VideoStream::close()
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        d->frameAcknowledgementSuspended = false;
     }
     {
         std::lock_guard lock(d->frameQueueMutex);
@@ -1037,6 +1040,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         destroySurfaces();
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        d->frameAcknowledgementSuspended = false;
     }
 
     const bool av1 = !d->av1Failed && Av1Encoder::isAvailable();
@@ -1092,17 +1096,24 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     {
         std::lock_guard lock(d->pendingFramesMutex);
 
-        auto itr = d->pendingFrames.constFind(id);
-        if (itr == d->pendingFrames.cend()) {
-            qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
-            return CHANNEL_RC_OK;
-        }
+        // The client does not acknowledge frames anymore, until it sends a
+        // regular acknowledgement again. Nothing is waited for until then.
+        d->frameAcknowledgementSuspended = frameAcknowledge->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
+        if (d->frameAcknowledgementSuspended) {
+            d->pendingFrames.clear();
+        } else {
+            auto itr = d->pendingFrames.constFind(id);
+            if (itr == d->pendingFrames.cend()) {
+                qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
+                return CHANNEL_RC_OK;
+            }
 
-        const auto elapsed = std::max<qint64>(1000, clk::duration_cast<clk::microseconds>(clk::steady_clock::now() - itr.value()).count());
-        const auto sample = std::min<qint64>(elapsed, 10000000);
-        d->acknowledgementUs = (7 * d->acknowledgementUs.load() + sample) / 8;
-        ++d->acknowledgedFrames;
-        d->pendingFrames.erase(itr);
+            const auto elapsed = std::max<qint64>(1000, clk::duration_cast<clk::microseconds>(clk::steady_clock::now() - itr.value()).count());
+            const auto sample = std::min<qint64>(elapsed, 10000000);
+            d->acknowledgementUs = (7 * d->acknowledgementUs.load() + sample) / 8;
+            ++d->acknowledgedFrames;
+            d->pendingFrames.erase(itr);
+        }
     }
 
     // Send the next frame right away.
@@ -1456,7 +1467,9 @@ void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.insert(frameId, clk::steady_clock::now());
+        if (!d->frameAcknowledgementSuspended) {
+            d->pendingFrames.insert(frameId, clk::steady_clock::now());
+        }
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu = {};
