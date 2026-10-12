@@ -42,7 +42,10 @@ if (Qt6Gui_VERSION VERSION_GREATER_EQUAL "6.10.0")
     find_package(Qt6GuiPrivate ${QT_MIN_VERSION} REQUIRED NO_MODULE)
 endif()
 
-find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config DBusAddons KCMUtils I18n CoreAddons StatusNotifierItem Crash GuiAddons)
+find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config DBusAddons KCMUtils I18n CoreAddons StatusNotifierItem Crash GuiAddons IdleTime)
+# Custom modes, used to resize virtual monitors, need libkscreen 6.6
+find_package(KF6Screen 6.6 REQUIRED)
+set_package_properties(KF6Screen PROPERTIES DESCRIPTION "Output management" PURPOSE "Resizing virtual monitors and turning physical monitors off during remote sessions")
 
 find_package(FreeRDP 3.1 REQUIRED)
 find_package(WinPR 3.1 REQUIRED)

@@ -40,4 +40,45 @@ SPDX-License-Identifier: BSD-2-Clause
       <default>false</default>
     </entry>
   </group>
+  <group name="VirtualDisplay">
+    <entry name="VirtualDisplayMode" type="Enum">
+      <label>How remote sessions use the displays of this computer</label>
+      <choices>
+        <choice name="Disabled">
+          <label>Show the physical monitors of this computer</label>
+        </choice>
+        <choice name="Extend">
+          <label>Add a virtual monitor matching the client next to the physical monitors</label>
+        </choice>
+        <choice name="Exclusive">
+          <label>Use only a virtual monitor matching the client, turning the physical monitors off while connected</label>
+        </choice>
+      </choices>
+      <default>Exclusive</default>
+    </entry>
+    <entry name="MaximumWidth" type="Int">
+      <label>Maximum width of a virtual monitor</label>
+      <default>4096</default>
+      <min>640</min>
+      <max>8192</max>
+    </entry>
+    <entry name="MaximumHeight" type="Int">
+      <label>Maximum height of a virtual monitor</label>
+      <default>4096</default>
+      <min>480</min>
+      <max>8192</max>
+    </entry>
+    <entry name="DetectLocalInput" type="Bool">
+      <label>Give the physical monitors back when local keyboard or mouse input is detected</label>
+      <default>true</default>
+    </entry>
+    <entry name="LockOnLocalTakeover" type="Bool">
+      <label>Lock the screen when the physical monitors are given back to someone at the computer</label>
+      <default>true</default>
+    </entry>
+    <entry name="DisconnectOnLocalTakeover" type="Bool">
+      <label>Disconnect remote clients when the physical monitors are given back to someone at the computer</label>
+      <default>false</default>
+    </entry>
+  </group>
 </kcfg>

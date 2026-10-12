@@ -7,11 +7,15 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QRegularExpression>
+#include <QTimer>
 
 #include <KAboutData>
 #include <KCrash>
 #include <KSharedConfig>
+#include <KSignalHandler>
 
 #include <qt6keychain/keychain.h>
 
@@ -21,6 +25,60 @@
 #include "krdpserversettings.h"
 
 using namespace Qt::StringLiterals;
+
+static const QString DBusService = u"org.kde.krdpserver"_s;
+static const QString DBusDisplaysPath = u"/org/kde/krdpserver/Displays"_s;
+
+static std::optional<VirtualDisplayManager::Mode> parseVirtualDisplayMode(QStringView value)
+{
+    if (value.compare(u"disabled", Qt::CaseInsensitive) == 0) {
+        return VirtualDisplayManager::Mode::Disabled;
+    }
+    if (value.compare(u"extend", Qt::CaseInsensitive) == 0) {
+        return VirtualDisplayManager::Mode::Extend;
+    }
+    if (value.compare(u"exclusive", Qt::CaseInsensitive) == 0) {
+        return VirtualDisplayManager::Mode::Exclusive;
+    }
+    return std::nullopt;
+}
+
+/**
+ * Restore the physical outputs saved by a krdpserver that did not exit cleanly.
+ */
+static int restoreDisplays(QApplication &application)
+{
+    if (!VirtualDisplayManager::hasSavedLayout()) {
+        return 0;
+    }
+
+    VirtualDisplayManager manager;
+    int result = 1;
+    QObject::connect(&manager, &VirtualDisplayManager::restoreFinished, &application, [&result](bool success) {
+        result = success ? 0 : 1;
+        QCoreApplication::quit();
+    });
+    QTimer::singleShot(10000, &application, &QCoreApplication::quit);
+    manager.restoreSavedLayout();
+    application.exec();
+    return result;
+}
+
+/**
+ * Ask a running krdpserver to give the physical outputs back, or restore
+ * them ourselves if it does not answer.
+ */
+static int returnDisplays(QApplication &application)
+{
+    auto message = QDBusMessage::createMethodCall(DBusService, DBusDisplaysPath, u"org.kde.krdpserver.Displays"_s, u"ReturnLocalDisplays"_s);
+    const auto reply = QDBusConnection::sessionBus().call(message, QDBus::Block, 2000);
+    if (reply.type() == QDBusMessage::ReplyMessage) {
+        return 0;
+    }
+
+    qWarning() << "krdpserver did not respond, restoring the displays directly:" << reply.errorMessage();
+    return restoreDisplays(application);
+}
 
 int main(int argc, char **argv)
 {
@@ -50,6 +108,11 @@ int main(int argc, char **argv)
          u"data"_s,
          u"1920x1080@1"_s},
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
+        {u"virtual-display"_s,
+         u"How remote sessions use the displays: disabled (stream the physical monitors), extend (add a virtual monitor matching the client) or exclusive (only use a virtual monitor matching the client, physical monitors are turned off while connected)."_s,
+         u"mode"_s},
+        {u"return-displays"_s, u"Turn the physical monitors back on while a remote session uses them exclusively, then exit."_s},
+        {u"restore-displays"_s, u"Restore the physical monitors if a previous instance did not exit cleanly, then exit."_s},
 #ifdef WITH_PLASMA_SESSION
         {u"plasma"_s, u"Use Plasma protocols instead of XDP"_s},
 #endif
@@ -58,13 +121,12 @@ int main(int argc, char **argv)
     parser.process(application);
     about.processCommandLine(&parser);
 
-    signal(SIGINT, [](int) {
-        QCoreApplication::exit(0);
-    });
-
-    signal(SIGTERM, [](int) {
-        QCoreApplication::exit(0);
-    });
+    if (parser.isSet(u"return-displays"_s)) {
+        return returnDisplays(application);
+    }
+    if (parser.isSet(u"restore-displays"_s)) {
+        return restoreDisplays(application);
+    }
 
     auto config = ServerConfig::self();
 
@@ -140,6 +202,35 @@ int main(int argc, char **argv)
         controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
     }
     controller.setQuality(parserValueWithDefault(u"quality", config->quality()));
+
+    auto virtualDisplayMode = static_cast<VirtualDisplayManager::Mode>(config->virtualDisplayMode());
+    if (parser.isSet(u"virtual-display"_s)) {
+        const auto mode = parseVirtualDisplayMode(parser.value(u"virtual-display"_s));
+        if (!mode) {
+            qWarning() << "failed to parse" << parser.value(u"virtual-display"_s) << ". Expected disabled, extend or exclusive";
+            return 1;
+        }
+        virtualDisplayMode = *mode;
+    } else if (parser.isSet(u"virtual-monitor"_s) && virtualDisplayMode == VirtualDisplayManager::Mode::Disabled) {
+        virtualDisplayMode = VirtualDisplayManager::Mode::Extend;
+    }
+    controller.setVirtualDisplayMode(virtualDisplayMode);
+    controller.setVirtualDisplayMaximumSize(QSize(config->maximumWidth(), config->maximumHeight()));
+    controller.setLocalTakeoverPolicy(config->detectLocalInput(), config->lockOnLocalTakeover(), config->disconnectOnLocalTakeover());
+
+    // Restore the physical monitors before exiting, if we turned them off.
+    KSignalHandler::self()->watchSignal(SIGINT);
+    KSignalHandler::self()->watchSignal(SIGTERM);
+    QObject::connect(KSignalHandler::self(), &KSignalHandler::signalReceived, &controller, [&controller](int) {
+        controller.shutdown([]() {
+            QCoreApplication::exit(0);
+        });
+    });
+
+    auto bus = QDBusConnection::sessionBus();
+    if (!bus.registerObject(DBusDisplaysPath, &controller, QDBusConnection::ExportScriptableSlots) || !bus.registerService(DBusService)) {
+        qWarning() << "Could not register on D-Bus, --return-displays will restore the displays directly";
+    }
 
     if (!server.start()) {
         return -1;

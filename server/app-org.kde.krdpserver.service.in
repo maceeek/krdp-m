@@ -8,6 +8,9 @@ After=plasma-core.target
 [Service]
 Type=exec
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdpserver
+# Turn the physical monitors back on if krdpserver turned them off and did
+# not get to restore them itself. KWin does this as well, this is a fallback.
+ExecStopPost=-@CMAKE_INSTALL_PREFIX@/bin/krdpserver --restore-displays
 Restart=on-abnormal
 
 [Install]
