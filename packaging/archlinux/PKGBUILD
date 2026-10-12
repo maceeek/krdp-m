@@ -5,13 +5,13 @@
 #
 #   cd packaging/archlinux && makepkg -si
 #
-# To build a different branch, change _branch below.
+# Builds the main branch. To build a different branch, append #branch=<name>
+# to the source below.
 
 pkgname=krdp-m-git
-_branch=claude/vibrant-noether-6w7ton
 pkgver=6.7.5.r0.g0000000
 pkgrel=1
-pkgdesc='KDE RDP server with virtual displays that follow the client (fork of krdp)'
+pkgdesc='KDE RDP server with virtual displays that follow the client and NVENC encoding (fork of krdp)'
 arch=(x86_64)
 url='https://github.com/maceeek/krdp-m'
 license=(LGPL-2.0-or-later)
@@ -44,7 +44,7 @@ makedepends=(extra-cmake-modules
              plasma-wayland-protocols)
 provides=(krdp)
 conflicts=(krdp)
-source=("krdp-m::git+https://github.com/maceeek/krdp-m.git#branch=${_branch}")
+source=("krdp-m::git+https://github.com/maceeek/krdp-m.git")
 sha256sums=('SKIP')
 
 pkgver() {
