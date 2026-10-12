@@ -32,7 +32,8 @@ class AbstractSession;
  *
  * Disabling the physical outputs always happens only once the virtual output
  * exists, and the previous layout of the physical outputs is saved to disk
- * before changing anything, so it can be restored when:
+ * as soon as a session registers, before its virtual output is created, so
+ * it can be restored when:
  *
  * - the last remote session ends,
  * - someone at the computer takes over (see LocalPresenceMonitor),
@@ -161,6 +162,11 @@ private:
     void releaseSessions();
     void setExclusive(bool exclusive);
 
+    /**
+     * Whether a remote session should get the outputs exclusively, its
+     * virtual output may not exist yet.
+     */
+    bool exclusivePending() const;
     bool wantsExclusive() const;
     bool applyExclusive(const KScreen::ConfigPtr &config);
     bool applySavedLayout(const KScreen::ConfigPtr &config);

@@ -88,6 +88,8 @@ private Q_SLOTS:
     void testLocalTakeover();
     void testMonitorEnabledExternally();
     void testRestoreAfterCrash();
+    void testRestoreUnusableLayout();
+    void testReturnAfterDisconnect();
     void testSanitizeSize();
     void testMonitorNames();
     void testMultipleMonitors_data();
@@ -294,6 +296,56 @@ void VirtualDisplayManagerTest::testRestoreAfterCrash()
     manager.restoreSavedLayout();
     QVERIFY(secondSpy.wait());
     QCOMPARE(secondSpy.first().first().toBool(), true);
+}
+
+void VirtualDisplayManagerTest::testRestoreUnusableLayout()
+{
+    // A layout saved while the physical outputs were already off, e.g. as KWin
+    // turned them off when the virtual output appeared.
+    auto config = currentConfig();
+    output(config, u"eDP-1"_s)->setEnabled(false);
+    output(config, u"HDMI-A-1"_s)->setEnabled(false);
+    auto operation = new KScreen::SetConfigOperation(config);
+    QVERIFY(operation->exec());
+
+    auto group = KSharedConfig::openStateConfig(u"krdp-serverstaterc"_s)->group(u"SavedDisplayLayout"_s);
+    group.writeEntry("Outputs", R"([{"name":"eDP-1","enabled":false},{"name":"HDMI-A-1","enabled":false}])"_ba);
+    group.sync();
+
+    // Falls back to enabling the physical outputs, and gets done with that.
+    VirtualDisplayManager manager;
+    QSignalSpy finishedSpy(&manager, &VirtualDisplayManager::restoreFinished);
+    manager.restoreSavedLayout();
+    QVERIFY(finishedSpy.wait());
+    QCOMPARE(finishedSpy.first().first().toBool(), true);
+    QVERIFY(!VirtualDisplayManager::hasSavedLayout());
+
+    config = currentConfig();
+    QVERIFY(output(config, u"eDP-1"_s)->isEnabled());
+    QVERIFY(output(config, u"HDMI-A-1"_s)->isEnabled());
+}
+
+void VirtualDisplayManagerTest::testReturnAfterDisconnect()
+{
+    VirtualDisplayManager manager;
+    manager.setMode(VirtualDisplayManager::Mode::Exclusive);
+
+    auto session = std::make_unique<FakeSession>(u"Virtual-krdp"_s);
+    manager.addSession(session.get(), QSize(1280, 720), 1.0);
+    QTRY_VERIFY(manager.isExclusive());
+
+    // Someone at the computer right after the last session ended.
+    manager.removeSession(std::move(session));
+    manager.returnToLocalDisplays();
+    QTRY_VERIFY(!manager.isExclusive());
+    QTRY_VERIFY(!VirtualDisplayManager::hasSavedLayout());
+    QVERIFY(output(currentConfig(), u"eDP-1"_s)->isEnabled());
+
+    // That is not a takeover of the next session.
+    auto next = std::make_unique<FakeSession>(u"Virtual-krdp"_s);
+    manager.addSession(next.get(), QSize(1280, 720), 1.0);
+    QTRY_VERIFY(manager.isExclusive());
+    QVERIFY(!output(currentConfig(), u"eDP-1"_s)->isEnabled());
 }
 
 void VirtualDisplayManagerTest::testSanitizeSize()

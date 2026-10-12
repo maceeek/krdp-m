@@ -53,6 +53,11 @@ KConfigGroup layoutGroup()
     return KSharedConfig::openStateConfig(u"krdp-serverstaterc"_s)->group(u"SavedDisplayLayout"_s);
 }
 
+QJsonArray savedOutputs()
+{
+    return QJsonDocument::fromJson(layoutGroup().readEntry("Outputs", QByteArray())).array();
+}
+
 KScreen::ModePtr findMode(const KScreen::OutputPtr &output, const QSize &size, float refreshRate)
 {
     KScreen::ModePtr best;
@@ -90,6 +95,13 @@ VirtualDisplayManager::VirtualDisplayManager(QObject *parent)
     });
 
     m_haveSavedLayout = hasSavedLayout();
+    if (m_haveSavedLayout) {
+        // Left behind by a previous instance, these are the physical outputs
+        // that were connected when it was saved.
+        for (const auto &value : savedOutputs()) {
+            m_physicalOutputsAtEntry.append(value.toObject()[u"name"_s].toString());
+        }
+    }
 
     connect(KScreen::ConfigMonitor::instance(), &KScreen::ConfigMonitor::configurationChanged, this, [this]() {
         scheduleReconcile(100);
@@ -235,7 +247,9 @@ void VirtualDisplayManager::returnToLocalDisplays()
     }
 
     qCInfo(KRDP_DISPLAYS) << "Returning the physical outputs to the local user";
-    m_localTakeover = true;
+    // Without remote sessions there is nothing to take over, only restore.
+    // Otherwise the next remote session would not be exclusive.
+    m_localTakeover = !m_displays.empty();
     m_attempts = 0;
     scheduleReconcile();
 }
@@ -313,9 +327,14 @@ void VirtualDisplayManager::resolveOutputs()
     }
 }
 
+bool VirtualDisplayManager::exclusivePending() const
+{
+    return m_mode == Mode::Exclusive && !m_localTakeover && !m_restoreRequested && !m_displays.empty();
+}
+
 bool VirtualDisplayManager::wantsExclusive() const
 {
-    if (m_mode != Mode::Exclusive || m_localTakeover || m_restoreRequested) {
+    if (!exclusivePending()) {
         return false;
     }
 
@@ -331,6 +350,13 @@ void VirtualDisplayManager::reconcile()
     if (!m_config) {
         return;
     }
+    if (exclusivePending() && !m_haveSavedLayout) {
+        // Save the layout before the virtual output exists. Once it gets
+        // created, KWin applies the configuration it stored for this set of
+        // outputs, which turns the physical outputs off if it was stored
+        // during an earlier remote session.
+        saveLayout(m_config);
+    }
     if (m_operationInFlight) {
         // Gets rescheduled once the operation is done.
         return;
@@ -343,9 +369,11 @@ void VirtualDisplayManager::reconcile()
 
     if (wantsExclusive()) {
         changed = applyExclusive(config);
-    } else if (m_haveSavedLayout) {
+    } else if (m_haveSavedLayout && !exclusivePending()) {
         changed = applySavedLayout(config);
     } else if (m_mode != Mode::Disabled) {
+        // Also while waiting for the virtual output of a new remote session,
+        // the physical outputs stay as they are until it exists.
         changed = applyExtended(config);
     }
 
@@ -358,7 +386,7 @@ void VirtualDisplayManager::reconcile()
 
         if (wantsExclusive()) {
             setExclusive(true);
-        } else if (m_haveSavedLayout) {
+        } else if (m_haveSavedLayout && !exclusivePending()) {
             qCInfo(KRDP_DISPLAYS) << "Physical outputs restored";
             clearSavedLayout();
         }
@@ -376,6 +404,19 @@ void VirtualDisplayManager::reconcile()
 
     if (++m_attempts > MaxAttempts) {
         qCWarning(KRDP_DISPLAYS) << "Giving up applying the output configuration after" << MaxAttempts << "attempts";
+        // Do not stay exclusive when the physical outputs are on anyway, that
+        // keeps the detection of someone at the computer armed and every
+        // movement of the mouse would try again.
+        const auto outputs = m_config->outputs();
+        const bool physicalEnabled = std::ranges::any_of(outputs, [](const auto &output) {
+            return isHardware(output) && output->isConnected() && output->isEnabled();
+        });
+        if (physicalEnabled) {
+            if (m_haveSavedLayout && !exclusivePending()) {
+                clearSavedLayout();
+            }
+            setExclusive(false);
+        }
         releaseSessions();
         if (m_restoreRequested) {
             m_restoreRequested = false;
@@ -409,10 +450,6 @@ bool VirtualDisplayManager::applyExclusive(const KScreen::ConfigPtr &config)
         }
     }
 
-    if (!m_haveSavedLayout) {
-        saveLayout(config);
-    }
-
     for (const auto &output : outputs) {
         if (!isOurs(output) && output->isConnected() && output->isEnabled()) {
             qCInfo(KRDP_DISPLAYS) << "Disabling physical output" << output->name();
@@ -429,70 +466,87 @@ bool VirtualDisplayManager::applyExclusive(const KScreen::ConfigPtr &config)
 
 bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
 {
-    const auto document = QJsonDocument::fromJson(layoutGroup().readEntry("Outputs", QByteArray()));
-    const auto saved = document.array();
+    const auto saved = savedOutputs();
+    const auto outputs = config->outputs();
+    auto connectedOutput = [&outputs](const QString &name) -> KScreen::OutputPtr {
+        auto it = std::ranges::find_if(outputs, [&name](const auto &output) {
+            return output->name() == name;
+        });
+        return it != outputs.end() && (*it)->isConnected() ? *it : KScreen::OutputPtr();
+    };
+
+    // The saved layout is unusable when it does not enable any output that
+    // is connected, e.g. the monitors were swapped while we were connected,
+    // or they were already off when it was saved. Applying it would turn off
+    // what the fallback below turns on, so we would never converge.
+    bool usable = false;
+    for (const auto &value : saved) {
+        const auto entry = value.toObject();
+        if (entry[u"enabled"_s].toBool() && connectedOutput(entry[u"name"_s].toString())) {
+            usable = true;
+            break;
+        }
+    }
 
     bool changed = false;
-    bool anyEnabled = false;
     QRect physicalGeometry;
     // Saved priorities, used to restore the order of the outputs.
     QList<std::pair<int, KScreen::OutputPtr>> savedPriorities;
 
-    for (const auto &value : saved) {
-        const auto entry = value.toObject();
-        const QString name = entry[u"name"_s].toString();
+    if (usable) {
+        for (const auto &value : saved) {
+            const auto entry = value.toObject();
+            const auto output = connectedOutput(entry[u"name"_s].toString());
+            if (!output) {
+                continue;
+            }
 
-        const auto outputs = config->outputs();
-        auto it = std::ranges::find_if(outputs, [&name](const auto &output) {
-            return output->name() == name;
-        });
-        if (it == outputs.end() || !(*it)->isConnected()) {
-            continue;
+            const bool enabled = entry[u"enabled"_s].toBool();
+            if (output->isEnabled() != enabled) {
+                output->setEnabled(enabled);
+                changed = true;
+            }
+            if (!enabled) {
+                continue;
+            }
+
+            const QPoint pos(entry[u"x"_s].toInt(), entry[u"y"_s].toInt());
+            if (output->pos() != pos) {
+                output->setPos(pos);
+                changed = true;
+            }
+
+            const QSize size(entry[u"width"_s].toInt(), entry[u"height"_s].toInt());
+            if (auto mode = findMode(output, size, entry[u"refreshRate"_s].toDouble()); mode && output->currentModeId() != mode->id()) {
+                output->setCurrentModeId(mode->id());
+                changed = true;
+            }
+
+            const qreal scale = entry[u"scale"_s].toDouble(1.0);
+            if (!sameScale(output->scale(), scale)) {
+                output->setScale(scale);
+                changed = true;
+            }
+
+            savedPriorities.append({entry[u"priority"_s].toInt(), output});
+
+            physicalGeometry |= QRect(pos, config->logicalSizeForOutputInt(*output));
         }
-        const auto &output = *it;
-
-        const bool enabled = entry[u"enabled"_s].toBool();
-        if (output->isEnabled() != enabled) {
-            output->setEnabled(enabled);
-            changed = true;
-        }
-        if (!enabled) {
-            continue;
-        }
-        anyEnabled = true;
-
-        const QPoint pos(entry[u"x"_s].toInt(), entry[u"y"_s].toInt());
-        if (output->pos() != pos) {
-            output->setPos(pos);
-            changed = true;
-        }
-
-        const QSize size(entry[u"width"_s].toInt(), entry[u"height"_s].toInt());
-        if (auto mode = findMode(output, size, entry[u"refreshRate"_s].toDouble()); mode && output->currentModeId() != mode->id()) {
-            output->setCurrentModeId(mode->id());
-            changed = true;
-        }
-
-        const qreal scale = entry[u"scale"_s].toDouble(1.0);
-        if (!sameScale(output->scale(), scale)) {
-            output->setScale(scale);
-            changed = true;
-        }
-
-        savedPriorities.append({entry[u"priority"_s].toInt(), output});
-
-        physicalGeometry |= QRect(pos, config->logicalSizeForOutputInt(*output));
-    }
-
-    if (!anyEnabled) {
-        // The saved layout is unusable, e.g. the monitors were swapped while
-        // we were connected. Fall back to enabling whatever is connected.
-        for (const auto &output : config->outputs()) {
-            if (!isOurs(output) && output->isConnected() && !output->isEnabled()) {
+    } else {
+        // Fall back to enabling whatever is connected.
+        for (const auto &output : outputs) {
+            if (!isHardware(output) || !output->isConnected()) {
+                continue;
+            }
+            if (!output->isEnabled()) {
                 qCInfo(KRDP_DISPLAYS) << "Enabling physical output" << output->name();
                 output->setEnabled(true);
                 changed = true;
             }
+
+            savedPriorities.append({int(output->priority()), output});
+
+            physicalGeometry |= QRect(output->pos(), config->logicalSizeForOutputInt(*output));
         }
     }
 
@@ -512,6 +566,20 @@ bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
 
 void VirtualDisplayManager::applyPriorities(const KScreen::ConfigPtr &config, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed)
 {
+    // Enabled outputs we do not place, e.g. the virtual monitors of sessions
+    // that are being released, go last. Otherwise libkscreen fits them in
+    // between the others and those do not get the priorities we want.
+    QList<KScreen::OutputPtr> others;
+    for (const auto &output : config->outputs()) {
+        if (output->isEnabled() && !priorities.contains(output)) {
+            others.append(output);
+        }
+    }
+    std::ranges::stable_sort(others, {}, &KScreen::Output::priority);
+    for (const auto &output : std::as_const(others)) {
+        priorities.insert(output, priorities.size() + 1);
+    }
+
     const bool differs = std::ranges::any_of(priorities.asKeyValueRange(), [](const auto &entry) {
         return entry.first->priority() != entry.second;
     });
