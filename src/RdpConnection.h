@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <QObject>
+#include <QSize>
 
 #include <freerdp/freerdp.h>
 
@@ -22,6 +23,7 @@ class VideoStream;
 class Cursor;
 class NetworkDetection;
 class Clipboard;
+class DisplayControl;
 
 /**
  * An RDP session.
@@ -98,6 +100,22 @@ public:
 
     Clipboard *clipboard() const;
 
+    /**
+     * The DisplayControl channel, used by the client to request a new desktop size.
+     */
+    DisplayControl *displayControl() const;
+
+    /**
+     * The desktop size the client requested when it connected.
+     *
+     * Only valid once the connection has been activated.
+     */
+    QSize clientDesktopSize() const;
+    /**
+     * The desktop scale factor the client requested when it connected, 1.0 if unset.
+     */
+    qreal clientDesktopScale() const;
+
     NetworkDetection *networkDetection() const;
 
 private:
@@ -110,6 +128,7 @@ private:
     friend class VideoStream;
     friend class NetworkDetection;
     friend class Clipboard;
+    friend class DisplayControl;
 
     void setState(State newState);
     void initialize();

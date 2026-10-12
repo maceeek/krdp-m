@@ -84,6 +84,12 @@ public:
     Q_SIGNAL void enabledChanged();
     void setStreamingEnabled(bool enabled);
     void setVideoQuality(quint8 quality);
+    /**
+     * Set the PipeWire node to stream from.
+     *
+     * \param fd A PipeWire remote to use, or -1 to use the default PipeWire
+     *           instance. The VideoStream takes ownership of the fd.
+     */
     void setPipeWireSource(quint32 nodeId, int fd = -1);
 
     bool openChannel();
@@ -100,6 +106,7 @@ private:
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
     void onFrameReceived(const PipeWireFrame &frame);
     void setActiveEncodingMode(EncodingMode mode);
+    void restartEncoder();
     void destroySurface();
     void performReset(QSize size);
     bool hasInFlightCapacity() const;

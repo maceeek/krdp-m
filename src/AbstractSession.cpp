@@ -60,6 +60,30 @@ void AbstractSession::setVirtualMonitor(const VirtualMonitor &virtualMonitor)
     d->virtualMonitor = virtualMonitor;
 }
 
+QString AbstractSession::virtualOutputName() const
+{
+    return QString();
+}
+
+void AbstractSession::setVirtualMonitorScale(qreal scale)
+{
+    if (!d->virtualMonitor || scale <= 0) {
+        return;
+    }
+    d->virtualMonitor->dpr = scale;
+    if (d->size.isValid()) {
+        d->logicalSize = (QSizeF(d->size) / scale).toSize();
+    }
+}
+
+QPointF AbstractSession::mapToLogical(const QPointF &position, const QRectF &target) const
+{
+    if (d->size.isEmpty()) {
+        return target.topLeft();
+    }
+    return QPointF{target.x() + (position.x() / d->size.width()) * target.width(), target.y() + (position.y() / d->size.height()) * target.height()};
+}
+
 bool AbstractSession::isStarted() const
 {
     return d->started;
@@ -68,6 +92,11 @@ bool AbstractSession::isStarted() const
 void AbstractSession::setSize(QSize size)
 {
     d->size = size;
+    // A virtual monitor changes size along with the stream, so its logical
+    // size needs to follow.
+    if (d->virtualMonitor && d->started && size.isValid() && d->virtualMonitor->dpr > 0) {
+        d->logicalSize = (QSizeF(size) / d->virtualMonitor->dpr).toSize();
+    }
 }
 
 void AbstractSession::setLogicalSize(QSize size)

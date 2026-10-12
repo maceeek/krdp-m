@@ -7,8 +7,11 @@
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QQueue>
+#include <QScreen>
 #include <QWaylandClientExtensionTemplate>
 #include <qpa/qplatformnativeinterface.h>
+
+#include <algorithm>
 
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
@@ -194,6 +197,15 @@ void PlasmaScreencastV1Session::start()
     });
 }
 
+QString PlasmaScreencastV1Session::virtualOutputName() const
+{
+    if (auto vm = virtualMonitor()) {
+        // KWin prefixes the names of the virtual outputs it creates.
+        return QStringLiteral("Virtual-") + vm->name;
+    }
+    return QString();
+}
+
 void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
 {
     if (!isStarted()) {
@@ -221,8 +233,22 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
     }
     case QEvent::MouseMove: {
         auto me = std::static_pointer_cast<QMouseEvent>(event);
-        auto position = me->position();
-        auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width(), (position.y() / size().height()) * logicalSize().height()};
+        // Absolute pointer motion is in global compositor coordinates, so
+        // map to the geometry of the streamed output where we know it.
+        QRectF target(QPointF(0, 0), logicalSize());
+        const auto screens = qApp->screens();
+        if (virtualMonitor()) {
+            const QString name = virtualOutputName();
+            auto it = std::find_if(screens.begin(), screens.end(), [&name](QScreen *screen) {
+                return screen->name() == name;
+            });
+            if (it != screens.end()) {
+                target = (*it)->geometry();
+            }
+        } else if (const auto streamIndex = activeStream(); streamIndex && *streamIndex >= 0 && *streamIndex < screens.size()) {
+            target = screens.at(*streamIndex)->geometry();
+        }
+        auto logicalPosition = mapToLogical(me->position(), target);
         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
         break;
     }

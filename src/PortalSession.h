@@ -38,6 +38,7 @@ public:
     ~PortalSession() override;
 
     void start() override;
+    QString virtualOutputName() const override;
     /**
      * Send a new event to the portal.
      *

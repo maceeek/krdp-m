@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <condition_variable>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <QDateTime>
 #include <QQueue>
 #include <QSet>
@@ -159,6 +162,20 @@ public:
     bool initialized = false;
     quint8 quality = 100;
 
+    // Set when the source changed size and the encoder needs to be restarted,
+    // packets from the old encoder are dropped until that happened.
+    bool encoderRestartPending = false;
+
+    // PipeWire streams take ownership of the fd they are given, so every
+    // stream we create gets its own duplicate of pipeWireFd.
+    int duplicatePipeWireFd() const
+    {
+        if (pipeWireFd <= 0) {
+            return pipeWireFd;
+        }
+        return fcntl(pipeWireFd, F_DUPFD_CLOEXEC, 3);
+    }
+
     void setSize(VideoStream *q, const QSize &newSize)
     {
         if (size == newSize) {
@@ -266,13 +283,21 @@ void VideoStream::setActiveEncodingMode(EncodingMode mode)
 
         connect(d->encodedStream.get(), &PipeWireEncodedStream::newPacket, this, &VideoStream::onPacketReceived);
         connect(d->encodedStream.get(), &PipeWireEncodedStream::sizeChanged, this, [this](const QSize &size) {
+            // The encoder is set up once for the initial size of the stream,
+            // so when the source changes size (e.g. a resized virtual monitor)
+            // it needs to be recreated.
+            const bool restartNeeded = d->size.isValid() && d->size != size;
             d->setSize(this, size);
+            if (restartNeeded && !d->encoderRestartPending) {
+                d->encoderRestartPending = true;
+                QMetaObject::invokeMethod(this, &VideoStream::restartEncoder, Qt::QueuedConnection);
+            }
         });
         connect(d->encodedStream.get(), &PipeWireEncodedStream::cursorChanged, this, &VideoStream::cursorChanged);
         if (d->nodeId != 0) {
             d->encodedStream->setNodeId(d->nodeId);
             if (d->pipeWireFd > 0) {
-                d->encodedStream->setFd(d->pipeWireFd);
+                d->encodedStream->setFd(d->duplicatePipeWireFd());
             }
         }
         if (d->streamingEnabled && d->nodeId != 0) {
@@ -299,7 +324,7 @@ void VideoStream::setActiveEncodingMode(EncodingMode mode)
             Qt::QueuedConnection);
 
         if (d->nodeId != 0 && d->pipeWireFd) {
-            if (!d->sourceStream->createStream(d->nodeId, d->pipeWireFd)) {
+            if (!d->sourceStream->createStream(d->nodeId, d->duplicatePipeWireFd())) {
                 qCWarning(KRDP) << "Could not create PipeWire source stream" << d->sourceStream->error();
                 d->session->close(RdpConnection::CloseReason::VideoInitFailed);
                 return;
@@ -313,6 +338,21 @@ void VideoStream::setActiveEncodingMode(EncodingMode mode)
 VideoStream::~VideoStream()
 {
     close();
+    if (d->pipeWireFd > 0) {
+        ::close(d->pipeWireFd);
+    }
+}
+
+void VideoStream::restartEncoder()
+{
+    d->encoderRestartPending = false;
+    if (d->activeEncodingMode != EncodingMode::H264) {
+        return;
+    }
+
+    qCDebug(KRDP) << "Stream size changed to" << d->size << "restarting encoder";
+    d->activeEncodingMode.reset();
+    setActiveEncodingMode(EncodingMode::H264);
 }
 
 bool VideoStream::initialize()
@@ -491,16 +531,21 @@ void VideoStream::setVideoQuality(quint8 quality)
 void VideoStream::setPipeWireSource(quint32 nodeId, int fd)
 {
     d->nodeId = nodeId;
+    if (d->pipeWireFd > 0 && d->pipeWireFd != fd) {
+        ::close(d->pipeWireFd);
+    }
     d->pipeWireFd = fd;
     if (d->encodedStream) {
         d->encodedStream->setNodeId(nodeId);
-        d->encodedStream->setFd(d->pipeWireFd);
+        if (d->pipeWireFd > 0) {
+            d->encodedStream->setFd(d->duplicatePipeWireFd());
+        }
         if (d->streamingEnabled) {
             d->encodedStream->start();
         }
     }
     if (d->sourceStream) {
-        if (!d->sourceStream->createStream(nodeId, d->pipeWireFd)) {
+        if (!d->sourceStream->createStream(nodeId, d->duplicatePipeWireFd())) {
             qCWarning(KRDP) << "Could not create PipeWire source stream" << d->sourceStream->error();
             d->session->close(RdpConnection::CloseReason::VideoInitFailed);
             return;
@@ -639,6 +684,11 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 
 void VideoStream::onPacketReceived(const PipeWireEncodedStream::Packet &data)
 {
+    if (d->encoderRestartPending) {
+        // Encoded at the old size, the client would fail to decode it.
+        return;
+    }
+
     VideoFrame frameData;
     frameData.size = d->size;
     frameData.data = data.data();

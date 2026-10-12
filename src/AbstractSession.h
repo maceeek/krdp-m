@@ -11,6 +11,8 @@
 
 #include <QEvent>
 #include <QObject>
+#include <QPointF>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 
@@ -41,6 +43,20 @@ public:
 
     void setActiveStream(int stream);
     void setVirtualMonitor(const VirtualMonitor &vm);
+
+    /**
+     * Name of the compositor output backing the virtual monitor of this session.
+     *
+     * If the exact name is not known in advance, this returns a prefix the
+     * name will start with. Empty if the session does not use a virtual monitor.
+     */
+    virtual QString virtualOutputName() const;
+
+    /**
+     * Update the scale of the virtual monitor, used to map the stream size
+     * to the logical size of the monitor.
+     */
+    void setVirtualMonitorScale(qreal scale);
     quint32 nodeId() const;
     int takePipeWireFd();
 
@@ -75,6 +91,12 @@ protected:
     QSize logicalSize() const;
     std::optional<VirtualMonitor> virtualMonitor() const;
     std::optional<int> activeStream() const;
+
+    /**
+     * Map a position in stream pixels to a position in the logical
+     * coordinate space of \p target.
+     */
+    QPointF mapToLogical(const QPointF &position, const QRectF &target) const;
 
     void setStarted(bool started);
     void setLogicalSize(QSize size);

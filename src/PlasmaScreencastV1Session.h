@@ -34,6 +34,7 @@ public:
     ~PlasmaScreencastV1Session() override;
 
     void start() override;
+    QString virtualOutputName() const override;
 
     void sendEvent(const std::shared_ptr<QEvent> &event) override;
     void setClipboardData(std::unique_ptr<QMimeData> data) override;

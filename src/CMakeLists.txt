@@ -30,6 +30,8 @@ target_sources(KRdp PRIVATE
     VideoStream.cpp
     VideoStream.h
     Cursor.cpp
+    DisplayControl.cpp
+    DisplayControl.h
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h

@@ -10,6 +10,7 @@
 #include "RdpConnection.h"
 
 #include <filesystem>
+#include <mutex>
 
 #include <fcntl.h>
 
@@ -26,6 +27,7 @@
 
 #include "Clipboard.h"
 #include "Cursor.h"
+#include "DisplayControl.h"
 #include "InputHandler.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
@@ -206,6 +208,13 @@ public:
     std::unique_ptr<Cursor> cursor;
     std::unique_ptr<NetworkDetection> networkDetection;
     std::unique_ptr<Clipboard> clipboard;
+    std::unique_ptr<DisplayControl> displayControl;
+
+    // Desktop size and scale the client asked for when connecting.
+    // Written from the connection thread, read from the main thread.
+    mutable std::mutex clientDesktopMutex;
+    QSize clientDesktopSize;
+    qreal clientDesktopScale = 1.0;
 
     freerdp_peer *peer = nullptr;
 
@@ -230,6 +239,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     d->cursor = std::make_unique<Cursor>(this);
     d->networkDetection = std::make_unique<NetworkDetection>(this);
     d->clipboard = std::make_unique<Clipboard>(this);
+    d->displayControl = std::make_unique<DisplayControl>(this);
 
     QMetaObject::invokeMethod(this, &RdpConnection::initialize, Qt::QueuedConnection);
 }
@@ -295,6 +305,23 @@ InputHandler *RdpConnection::inputHandler() const
 KRdp::VideoStream *RdpConnection::videoStream() const
 {
     return d->videoStream.get();
+}
+
+DisplayControl *RdpConnection::displayControl() const
+{
+    return d->displayControl.get();
+}
+
+QSize RdpConnection::clientDesktopSize() const
+{
+    std::lock_guard lock(d->clientDesktopMutex);
+    return d->clientDesktopSize;
+}
+
+qreal RdpConnection::clientDesktopScale() const
+{
+    std::lock_guard lock(d->clientDesktopMutex);
+    return d->clientDesktopScale;
 }
 
 Cursor *RdpConnection::cursor() const
@@ -375,6 +402,7 @@ void RdpConnection::initialize()
     freerdp_settings_set_bool(settings, FreeRDP_GfxSmallCache, false);
     freerdp_settings_set_bool(settings, FreeRDP_GfxThinClient, false);
     freerdp_settings_set_bool(settings, FreeRDP_SupportDynamicChannels, true);
+    freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, true);
 
     freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, true);
     freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, true);
@@ -475,6 +503,9 @@ void RdpConnection::run(std::stop_token stopToken)
 
         if (d->peer->connected && d->state == State::Activated && drdynvcJoined) {
             if (drdynvcState == DRDYNVC_STATE_READY) {
+                // Not fatal, without it the client just can't ask for a different desktop size.
+                d->displayControl->initialize();
+
                 if (!d->videoStream->openChannel()) {
                     qCWarning(KRDP) << "Unable to open RDPGFX channel";
                 } else {
@@ -519,6 +550,20 @@ bool RdpConnection::onCapabilities()
 
 bool RdpConnection::onActivate()
 {
+    {
+        auto settings = d->peer->context->settings;
+        const auto scaleFactor = freerdp_settings_get_uint32(settings, FreeRDP_DesktopScaleFactor);
+
+        std::lock_guard lock(d->clientDesktopMutex);
+        // Only remember the size from the first activation, later activations
+        // are the result of us resizing the desktop.
+        if (!d->clientDesktopSize.isValid()) {
+            d->clientDesktopSize = QSize(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth), freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+            d->clientDesktopScale = scaleFactor >= 100 && scaleFactor <= 500 ? scaleFactor / 100.0 : 1.0;
+            qCDebug(KRDP) << "Client desktop size" << d->clientDesktopSize << "scale" << d->clientDesktopScale;
+        }
+    }
+
     setState(State::Activated);
     return true;
 }
@@ -561,6 +606,7 @@ bool RdpConnection::onPostConnect()
 bool RdpConnection::onClose()
 {
     d->clipboard->close();
+    d->displayControl->close();
     d->videoStream->close();
     setState(State::Closed);
     return true;

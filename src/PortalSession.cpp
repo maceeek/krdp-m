@@ -165,6 +165,17 @@ PortalSession::~PortalSession()
     qCDebug(KRDP) << "Closing Freedesktop Portal Session";
 }
 
+QString PortalSession::virtualOutputName() const
+{
+    if (!virtualMonitor()) {
+        return QString();
+    }
+    // xdg-desktop-portal-kde names the virtual output after the requesting
+    // application and may append a suffix to make it unique, so this is only
+    // a prefix.
+    return QStringLiteral("Virtual-virtual-xdp-kde-") + QGuiApplication::desktopFileName();
+}
+
 void PortalSession::start()
 {
     qCDebug(KRDP) << "Initializing Freedesktop Portal Session";
@@ -205,8 +216,8 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
     }
     case QEvent::MouseMove: {
         auto me = std::static_pointer_cast<QMouseEvent>(event);
-        auto position = me->position();
-        auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width(), (position.y() / size().height()) * logicalSize().height()};
+        // Portal pointer motion is relative to the stream.
+        auto logicalPosition = mapToLogical(me->position(), QRectF(QPointF(0, 0), logicalSize()));
         const auto node = nodeId();
         enqueueInputCall([this, node, logicalPosition]() {
             return d->remoteInterface->NotifyPointerMotionAbsolute(d->sessionPath, QVariantMap{}, node, logicalPosition.x(), logicalPosition.y());
