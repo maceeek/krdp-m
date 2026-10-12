@@ -90,6 +90,8 @@ private Q_SLOTS:
     void testRestoreAfterCrash();
     void testSanitizeSize();
     void testMonitorNames();
+    void testMultipleMonitors_data();
+    void testMultipleMonitors();
 };
 
 void VirtualDisplayManagerTest::initTestCase()
@@ -319,6 +321,54 @@ void VirtualDisplayManagerTest::testMonitorNames()
     manager.removeSession(std::move(first));
     QCOMPARE(manager.allocateMonitorName(), u"krdp-2"_s);
     QTRY_COMPARE(manager.allocateMonitorName(), u"krdp"_s);
+}
+
+void VirtualDisplayManagerTest::testMultipleMonitors_data()
+{
+    QTest::addColumn<VirtualDisplayManager::Mode>("mode");
+    // Where the monitors of the client start.
+    QTest::addColumn<QPoint>("origin");
+
+    QTest::newRow("exclusive") << VirtualDisplayManager::Mode::Exclusive << QPoint(0, 0);
+    // Next to the physical monitor.
+    QTest::newRow("extend") << VirtualDisplayManager::Mode::Extend << QPoint(1920, 0);
+}
+
+void VirtualDisplayManagerTest::testMultipleMonitors()
+{
+    QFETCH(VirtualDisplayManager::Mode, mode);
+    QFETCH(QPoint, origin);
+
+    KScreen::BackendManager::instance()->shutdownBackend();
+    KScreen::BackendManager::instance()->setBackendArgs({{u"TEST_DATA"_s, QFINDTESTDATA("data/multimonitor.json")}});
+
+    VirtualDisplayManager manager;
+    manager.setMode(mode);
+
+    // Two monitors of one client side by side.
+    int client = 0;
+    auto first = std::make_unique<FakeSession>(u"Virtual-krdp"_s);
+    auto second = std::make_unique<FakeSession>(u"Virtual-krdp-2"_s);
+    manager.addSession(first.get(), QSize(1280, 1024), 1.0, &client, QPoint(0, 0));
+    manager.addSession(second.get(), QSize(1024, 768), 1.0, &client, QPoint(1280, 0));
+
+    QTRY_COMPARE(output(currentConfig(), u"Virtual-krdp-2"_s)->pos(), origin + QPoint(1280, 0));
+    auto config = currentConfig();
+    QCOMPARE(output(config, u"Virtual-krdp"_s)->pos(), origin);
+    QCOMPARE(output(config, u"eDP-1"_s)->isEnabled(), mode != VirtualDisplayManager::Mode::Exclusive);
+    QVERIFY(output(config, u"Virtual-krdp"_s)->isEnabled());
+    QVERIFY(output(config, u"Virtual-krdp-2"_s)->isEnabled());
+    QVERIFY(output(config, u"Virtual-krdp"_s)->priority() < output(config, u"Virtual-krdp-2"_s)->priority());
+
+    // The client moves its second monitor below the first one.
+    manager.requestLayout(second.get(), QSize(1024, 768), 1.0, QPoint(0, 1024));
+    QTRY_COMPARE(output(currentConfig(), u"Virtual-krdp-2"_s)->pos(), origin + QPoint(0, 1024));
+    QCOMPARE(output(currentConfig(), u"Virtual-krdp"_s)->pos(), origin);
+
+    manager.removeSession(std::move(first));
+    manager.removeSession(std::move(second));
+    QTRY_VERIFY(!VirtualDisplayManager::hasSavedLayout());
+    QTRY_VERIFY(output(currentConfig(), u"eDP-1"_s)->isEnabled());
 }
 
 QTEST_GUILESS_MAIN(VirtualDisplayManagerTest)

@@ -1,0 +1,119 @@
+{
+    "screen": {
+        "id": 1,
+        "maxSize": {
+            "width": 16384,
+            "height": 16384
+        },
+        "minSize": {
+            "width": 320,
+            "height": 200
+        },
+        "currentSize": {
+            "width": 6024,
+            "height": 1080
+        },
+        "maxActiveOutputsCount": 8
+    },
+    "outputs": [
+        {
+            "id": 1,
+            "name": "eDP-1",
+            "type": "Panel",
+            "modes": [
+                {
+                    "id": "11",
+                    "name": "1920x1080",
+                    "refreshRate": 60,
+                    "size": {
+                        "width": 1920,
+                        "height": 1080
+                    }
+                }
+            ],
+            "pos": {
+                "x": 0,
+                "y": 0
+            },
+            "size": {
+                "width": 1920,
+                "height": 1080
+            },
+            "currentModeId": "11",
+            "preferredModes": [
+                "11"
+            ],
+            "rotation": 1,
+            "scale": 1,
+            "connected": true,
+            "enabled": true,
+            "priority": 1
+        },
+        {
+            "id": 2,
+            "name": "Virtual-krdp",
+            "type": "Unknown",
+            "modes": [
+                {
+                    "id": "21",
+                    "name": "1280x1024",
+                    "refreshRate": 60,
+                    "size": {
+                        "width": 1280,
+                        "height": 1024
+                    }
+                }
+            ],
+            "pos": {
+                "x": 1920,
+                "y": 0
+            },
+            "size": {
+                "width": 1280,
+                "height": 1024
+            },
+            "currentModeId": "21",
+            "preferredModes": [
+                "21"
+            ],
+            "rotation": 1,
+            "scale": 1,
+            "connected": true,
+            "enabled": true,
+            "priority": 2
+        },
+        {
+            "id": 3,
+            "name": "Virtual-krdp-2",
+            "type": "Unknown",
+            "modes": [
+                {
+                    "id": "31",
+                    "name": "1024x768",
+                    "refreshRate": 60,
+                    "size": {
+                        "width": 1024,
+                        "height": 768
+                    }
+                }
+            ],
+            "pos": {
+                "x": 5000,
+                "y": 0
+            },
+            "size": {
+                "width": 1024,
+                "height": 768
+            },
+            "currentModeId": "31",
+            "preferredModes": [
+                "31"
+            ],
+            "rotation": 1,
+            "scale": 1,
+            "connected": true,
+            "enabled": true,
+            "priority": 3
+        }
+    ]
+}

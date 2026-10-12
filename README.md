@@ -28,6 +28,25 @@ group of `krdpserverrc` or with `--virtual-display`:
 | `Extend` | Add a virtual monitor matching the client next to the monitors. |
 | `Exclusive` (default) | Only use a virtual monitor matching the client. The monitors of the computer are turned off while a client is connected. |
 
+### Multiple monitors
+
+Clients with several monitors get a virtual monitor for each of them,
+arranged like on the client, with windows moving between them as usual.
+Pointer input goes to the monitor the pointer is on.
+
+- **KRDC**: set *Resolution* to *Use All Screens Resolution* in the
+  connection settings. KRDC then opens a fullscreen window on every monitor.
+  With *Current Window Size* KRDC uses a single monitor that follows the size
+  of its window instead.
+- **FreeRDP**: `xfreerdp3 /multimon` or `sdl-freerdp3 /multimon`, with
+  `/dynamic-resolution` for a single monitor that follows the window.
+- **Windows Remote Desktop**: "Use all my monitors for the remote session".
+
+The monitors are created when the client connects. Moving or resizing them
+during a session is supported for clients that report it; to use a different
+number of monitors, reconnect. Multiple monitors need the Plasma screencasting
+protocol; through the portal only the primary monitor is used.
+
 ### Getting the monitors back
 
 In exclusive mode the monitors of the computer are turned off while a client is
