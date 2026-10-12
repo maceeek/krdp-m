@@ -10,7 +10,9 @@ Dependencies:
       'frameworks/kstatusnotifieritem': '@latest-kf6'
       'frameworks/kcmutils': '@latest-kf6'
       'frameworks/kcrash': '@latest-kf6'
+      'frameworks/kidletime': '@latest-kf6'
       'plasma/kpipewire': '@latest-kf6'
+      'plasma/libkscreen': '@latest-kf6'
       'libraries/kirigami-addons': '@latest-kf6'
       'third-party/qtkeychain': '@latest'
 

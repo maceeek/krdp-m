@@ -1,0 +1,67 @@
+# Maintainer: KRdp-M contributors
+#
+# Builds krdp with virtual display support from this repository and replaces
+# the krdp package of Arch Linux / CachyOS.
+#
+#   cd packaging/archlinux && makepkg -si
+#
+# To build a different branch, change _branch below.
+
+pkgname=krdp-m-git
+_branch=claude/lucid-franklin-83pwu0
+pkgver=6.7.5.r0.g0000000
+pkgrel=1
+pkgdesc='KDE RDP server with virtual displays that follow the client (fork of krdp)'
+arch=(x86_64)
+url='https://github.com/maceeek/krdp-m'
+license=(LGPL-2.0-or-later)
+depends=(freerdp
+         gcc-libs
+         glibc
+         kcmutils
+         kconfig
+         kcoreaddons
+         kcrash
+         kdbusaddons
+         kguiaddons
+         ki18n
+         kidletime
+         kirigami
+         kirigami-addons
+         kpipewire
+         kstatusnotifieritem
+         libkscreen
+         libxkbcommon
+         pam
+         qt6-base
+         qt6-declarative
+         qt6-wayland
+         qtkeychain-qt6
+         systemd-libs)
+makedepends=(extra-cmake-modules
+             git
+             plasma-wayland-protocols)
+provides=(krdp)
+conflicts=(krdp)
+source=("krdp-m::git+https://github.com/maceeek/krdp-m.git#branch=${_branch}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd krdp-m
+  local version
+  version=$(sed -n 's/^set(PROJECT_VERSION "\(.*\)").*/\1/p' CMakeLists.txt)
+  printf "%s.r%s.g%s" "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cmake -B build -S krdp-m \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

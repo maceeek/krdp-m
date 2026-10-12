@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 KRdp-M contributors
+# SPDX-License-Identifier: CC0-1.0
+
+# Builds and tests against the libraries of Arch Linux, which CachyOS is based on.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  archlinux:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git cmake ninja extra-cmake-modules plasma-wayland-protocols \
+            freerdp kcmutils kconfig kcoreaddons kcrash kdbusaddons kguiaddons ki18n \
+            kidletime kirigami kirigami-addons kpipewire kstatusnotifieritem libkscreen \
+            libxkbcommon pam qt6-base qt6-declarative qt6-wayland qtkeychain-qt6 systemd-libs
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        # The KCM smoke test needs kcmshell6 and a session, skip it here.
+        run: ctest --test-dir build --output-on-failure --exclude-regex kcm_smoketest

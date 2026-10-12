@@ -1,3 +1,102 @@
+# KRdp-M
+
+KRdp-M is a fork of [KRdp](https://invent.kde.org/plasma/krdp), the RDP server
+of KDE Plasma, based on its Plasma 6.7 branch. It adds virtual displays that
+follow the RDP client, see [Virtual displays](#virtual-displays) below.
+
+It builds against the libraries of Plasma 6.7 and replaces the `krdp` package,
+for Arch Linux and CachyOS see [Installing on Arch Linux and CachyOS](#installing-on-arch-linux-and-cachyos).
+
+## Virtual displays
+
+Instead of streaming the monitors connected to the computer, a remote session
+can get its own virtual monitor that matches the client:
+
+- It is created at the size and scale the client asks for when it connects.
+- It is resized whenever the client asks for a different size, e.g. when the
+  client window is resized or goes fullscreen. Use `/dynamic-resolution` with
+  FreeRDP, Remmina's "Dynamic resolution update" or the default behaviour of
+  the Windows Remote Desktop client. Windows stay where they are when resizing.
+
+How remote sessions use the displays is configured in System Settings ›
+Remote Desktop › Displays, with `VirtualDisplayMode` in the `[VirtualDisplay]`
+group of `krdpserverrc` or with `--virtual-display`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `Disabled` | Stream the monitors of the computer, like upstream KRdp. |
+| `Extend` | Add a virtual monitor matching the client next to the monitors. |
+| `Exclusive` (default) | Only use a virtual monitor matching the client. The monitors of the computer are turned off while a client is connected. |
+
+### Getting the monitors back
+
+In exclusive mode the monitors of the computer are turned off while a client is
+connected. They are only turned off once the virtual monitor exists, and their
+layout is saved before changing anything. They are turned back on with the
+saved layout when:
+
+- the last client disconnects;
+- someone at the computer presses **Meta+Ctrl+Alt+R** (configurable in System
+  Settings › Shortcuts › Return Displays to This Computer). This runs
+  `krdpserver --return-displays` as a separate process, so it also works if
+  krdpserver does not respond;
+- someone at the computer uses the keyboard or mouse while the remote user is
+  idle for a moment (`DetectLocalInput`), or plugs in or turns on a monitor;
+- "Return Displays to This Computer" is picked from the tray icon;
+- krdpserver exits, or crashes: KWin itself restores the layout of the monitors
+  as soon as the virtual monitor disappears, and krdpserver additionally
+  restores its saved layout when it starts again and in `ExecStopPost` of its
+  systemd unit (`krdpserver --restore-displays`).
+
+When the monitors are given back to someone at the computer, the screen is
+locked first (`LockOnLocalTakeover`), so they can not see the desktop of the
+remote user. Remote clients continue on their virtual monitors next to the
+monitors, or are disconnected if `DisconnectOnLocalTakeover` is set. The next
+remote session is exclusive again.
+
+### Configuration
+
+All keys are in the `[VirtualDisplay]` group of `~/.config/krdpserverrc`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `VirtualDisplayMode` | `Exclusive` | `Disabled`, `Extend` or `Exclusive`, see above. |
+| `MaximumWidth`, `MaximumHeight` | `4096` | Largest virtual monitor that gets created, clients asking for more get this size. |
+| `DetectLocalInput` | `true` | Give the monitors back when local input is detected. |
+| `LockOnLocalTakeover` | `true` | Lock the screen before giving the monitors back. |
+| `DisconnectOnLocalTakeover` | `false` | Disconnect remote clients when giving the monitors back. |
+
+```bash
+kwriteconfig6 --file krdpserverrc --group VirtualDisplay --key VirtualDisplayMode Extend
+systemctl --user restart app-org.kde.krdpserver.service
+```
+
+### Requirements
+
+- KWin 6.6 or newer, which supports custom modes on virtual outputs.
+- The Plasma screencasting protocol is used for virtual monitors when
+  available (it is for krdpserver started through its systemd unit or desktop
+  file), the remote desktop portal otherwise.
+
+### Debugging
+
+```bash
+QT_LOGGING_RULES="org.kde.krdp*=true" krdpserver
+# or for the systemd unit
+journalctl --user -u app-org.kde.krdpserver.service -f
+```
+
+## Installing on Arch Linux and CachyOS
+
+```bash
+git clone https://github.com/maceeek/krdp-m.git
+cd krdp-m/packaging/archlinux
+makepkg -si
+```
+
+This builds the `krdp-m-git` package, which replaces `krdp`. The branch that
+gets built is set by `_branch` in the PKGBUILD.
+
 # KRdp
 
 Library and examples for creating an RDP server.
@@ -62,6 +161,12 @@ The following command line options are available for the example server:
     <dt>--monitor <monitor></dt>The index of the monitor to use for streaming video. If not supplied the whole workspace is used.</dd>
     <dt>--quality <quality></dt>
     <dd>Set the video quality, from 0 (lowest) to 100 (highest).</dd>
+    <dt>--virtual-display <mode></dt>
+    <dd>How remote sessions use the displays: <code>disabled</code>, <code>extend</code> or <code>exclusive</code>. Overrides the configuration.</dd>
+    <dt>--return-displays</dt>
+    <dd>Turn the monitors back on while a remote session uses them exclusively, then exit.</dd>
+    <dt>--restore-displays</dt>
+    <dd>Restore the monitors if a previous instance did not exit cleanly, then exit.</dd>
 </dl>
 
 # Known Working and Not-Working Clients
