@@ -134,9 +134,15 @@ QString VirtualDisplayManager::allocateMonitorName() const
 {
     for (int i = 1;; ++i) {
         const QString name = i == 1 ? MonitorNameBase : MonitorNameBase + u'-' + QString::number(i);
-        const bool used = std::ranges::any_of(m_displays, [&name](const auto &display) {
-            return display->outputName == VirtualOutputPrefix + name;
-        });
+        const QString outputName = VirtualOutputPrefix + name;
+        // Sessions that are being released still have their output.
+        const bool used = std::ranges::any_of(m_displays,
+                                              [&outputName](const auto &display) {
+                                                  return display->outputName == outputName;
+                                              })
+            || std::ranges::any_of(m_releasedSessions, [&outputName](const auto &session) {
+                   return session->virtualOutputName() == outputName;
+               });
         if (!used) {
             return name;
         }

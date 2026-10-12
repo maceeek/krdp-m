@@ -89,6 +89,7 @@ private Q_SLOTS:
     void testMonitorEnabledExternally();
     void testRestoreAfterCrash();
     void testSanitizeSize();
+    void testMonitorNames();
 };
 
 void VirtualDisplayManagerTest::initTestCase()
@@ -302,6 +303,22 @@ void VirtualDisplayManagerTest::testSanitizeSize()
     QCOMPARE(manager.sanitizeSize(QSize(7680, 4320)), QSize(4096, 4096));
     manager.setMaximumSize(QSize(2560, 1440));
     QCOMPARE(manager.sanitizeSize(QSize(3840, 2160)), QSize(2560, 1440));
+}
+
+void VirtualDisplayManagerTest::testMonitorNames()
+{
+    VirtualDisplayManager manager;
+    manager.setMode(VirtualDisplayManager::Mode::Exclusive);
+    QCOMPARE(manager.allocateMonitorName(), u"krdp"_s);
+
+    auto first = std::make_unique<FakeSession>(u"Virtual-krdp"_s);
+    manager.addSession(first.get(), QSize(1280, 720), 1.0);
+    QCOMPARE(manager.allocateMonitorName(), u"krdp-2"_s);
+
+    // Still taken while the session is kept alive for restoring the outputs.
+    manager.removeSession(std::move(first));
+    QCOMPARE(manager.allocateMonitorName(), u"krdp-2"_s);
+    QTRY_COMPARE(manager.allocateMonitorName(), u"krdp"_s);
 }
 
 QTEST_GUILESS_MAIN(VirtualDisplayManagerTest)
