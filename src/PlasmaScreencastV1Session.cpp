@@ -173,6 +173,12 @@ PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
     qCDebug(KRDP) << "Closing Plasma Remote Session";
 }
 
+bool PlasmaScreencastV1Session::isAvailable()
+{
+    static const bool available = Screencasting().isAvailable();
+    return available;
+}
+
 void PlasmaScreencastV1Session::start()
 {
     if (auto vm = virtualMonitor()) {
@@ -187,11 +193,20 @@ void PlasmaScreencastV1Session::start()
     } else {
         d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
     }
+    if (!d->request) {
+        qCWarning(KRDP) << "Could not create a Plasma screencast stream";
+        QMetaObject::invokeMethod(this, &PlasmaScreencastV1Session::error, Qt::QueuedConnection);
+        return;
+    }
     connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
     connect(d->request, &ScreencastingStream::created, this, [this](uint nodeId) {
         qCDebug(KRDP) << "Started Plasma session";
 
-        setLogicalSize(d->request->size());
+        if (auto vm = virtualMonitor(); vm && vm->dpr > 0) {
+            setLogicalSize((QSizeF(d->request->size()) / vm->dpr).toSize());
+        } else {
+            setLogicalSize(d->request->size());
+        }
         setNodeId(nodeId);
         setStarted(true);
     });

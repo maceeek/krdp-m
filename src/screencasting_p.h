@@ -45,6 +45,11 @@ public:
     };
     Q_ENUM(CursorMode)
 
+    /**
+     * Whether the compositor lets us use the screencasting protocol.
+     */
+    bool isAvailable() const;
+
     ScreencastingStream *createOutputStream(QScreen *screen, CursorMode mode);
     ScreencastingStream *createWorkspaceStream(CursorMode mode);
     ScreencastingStream *createRegionStream(QRect g, qreal scale, CursorMode mode);

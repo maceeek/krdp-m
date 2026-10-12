@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <QElapsedTimer>
+#include <QMap>
 #include <QObject>
 #include <QPointer>
 #include <QSize>
@@ -24,8 +25,8 @@ class AbstractSession;
  *
  * Every session that streams a virtual monitor is registered here. The
  * manager then makes sure the output matches what the client asked for
- * (resolution and scale) and, in exclusive mode, disables the physical
- * outputs for as long as a remote session is active.
+ * (resolution and scale) and, in exclusive mode, disables all other
+ * outputs (the physical monitors) for as long as a remote session is active.
  *
  * Disabling the physical outputs always happens only once the virtual output
  * exists, and the previous layout of the physical outputs is saved to disk
@@ -154,12 +155,26 @@ private:
     bool applyExclusive(const KScreen::ConfigPtr &config);
     bool applySavedLayout(const KScreen::ConfigPtr &config);
     bool applyDisplayModes(const KScreen::ConfigPtr &config);
-    void placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, uint32_t priority, bool &changed);
+    /**
+     * Enable our virtual outputs and place them next to each other starting
+     * at \p x, their priorities are appended to \p priorities.
+     */
+    void placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed);
+    void applyPriorities(const KScreen::ConfigPtr &config, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed);
 
     void saveLayout(const KScreen::ConfigPtr &config);
     void clearSavedLayout();
 
-    static bool isPhysical(const KScreen::OutputPtr &output);
+    /**
+     * Whether the output is a virtual monitor of one of our sessions. In
+     * exclusive mode, all other outputs are turned off.
+     */
+    bool isOurs(const KScreen::OutputPtr &output) const;
+    /**
+     * Whether the output is a monitor connected to the computer, as opposed
+     * to a virtual output created by an application.
+     */
+    static bool isHardware(const KScreen::OutputPtr &output);
 
     Mode m_mode = Mode::Disabled;
     QSize m_maximumSize = QSize(4096, 4096);

@@ -283,6 +283,86 @@ KCM.ScrollViewKCM {
 
         Item {
             Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18nc("title:group Group of RDP server settings", "Displays")
+        }
+
+        QQC2.ComboBox {
+            id: virtualDisplayCombo
+            Kirigami.FormData.label: i18nc("@label:listbox", "Remote sessions show:")
+            // Same order as the VirtualDisplayMode choices in krdpserversettings.kcfg
+            implicitContentWidthPolicy: QQC2.ComboBox.WidestText
+            model: [
+                i18nc("@item:inlistbox virtual display mode", "Monitors of this computer"),
+                i18nc("@item:inlistbox virtual display mode", "Virtual monitor next to them"),
+                i18nc("@item:inlistbox virtual display mode", "Virtual monitor only"),
+            ]
+            currentIndex: settings.virtualDisplayMode
+            onActivated: index => {
+                settings.virtualDisplayMode = index;
+            }
+            Connections {
+                target: settings
+                function onVirtualDisplayModeChanged() {
+                    virtualDisplayCombo.currentIndex = settings.virtualDisplayMode;
+                }
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "virtualDisplayMode"
+            }
+        }
+
+        QQC2.Label {
+            visible: settings.virtualDisplayMode !== 0
+            Layout.maximumWidth: certKeyLayout.width
+            wrapMode: Text.Wrap
+            font: Kirigami.Theme.smallFont
+            text: settings.virtualDisplayMode === 2
+                ? xi18nc("@info", "The virtual monitor follows the size of the client window. The monitors of this computer are turned off while a client is connected, press <shortcut>Meta+Ctrl+Alt+R</shortcut> at this computer to turn them back on.")
+                : i18nc("@info", "The virtual monitor follows the size of the client window.")
+        }
+
+        QQC2.CheckBox {
+            visible: settings.virtualDisplayMode === 2
+            text: i18nc("@option:check", "Turn monitors back on when someone uses this computer")
+            checked: settings.detectLocalInput
+            onToggled: {
+                settings.detectLocalInput = checked;
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "detectLocalInput"
+            }
+        }
+
+        QQC2.CheckBox {
+            visible: settings.virtualDisplayMode === 2
+            text: i18nc("@option:check", "Lock the screen when the monitors are turned back on")
+            checked: settings.lockOnLocalTakeover
+            onToggled: {
+                settings.lockOnLocalTakeover = checked;
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "lockOnLocalTakeover"
+            }
+        }
+
+        QQC2.CheckBox {
+            visible: settings.virtualDisplayMode === 2
+            text: i18nc("@option:check", "Disconnect remote clients when the monitors are turned back on")
+            checked: settings.disconnectOnLocalTakeover
+            onToggled: {
+                settings.disconnectOnLocalTakeover = checked;
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "disconnectOnLocalTakeover"
+            }
+        }
+
+        Item {
+            Kirigami.FormData.isSection: true
             Kirigami.FormData.label: i18nc("title:group Group of RDP server settings", "Security Certificates")
         }
 

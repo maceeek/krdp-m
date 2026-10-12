@@ -325,7 +325,7 @@ std::unique_ptr<KRdp::AbstractSession> SessionController::makeSession(bool virtu
 #ifdef WITH_PLASMA_SESSION
     // The Plasma protocols let us name the virtual output and create it at
     // the right size directly, without a portal dialog.
-    if (m_sessionType == SessionType::Plasma || virtualDisplay) {
+    if (m_sessionType == SessionType::Plasma || (virtualDisplay && KRdp::PlasmaScreencastV1Session::isAvailable())) {
         return std::make_unique<KRdp::PlasmaScreencastV1Session>();
     } else
 #endif

@@ -78,7 +78,6 @@ public:
         if (!isInitialized()) {
             qWarning() << "Remember requesting the interface on your desktop file: X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1";
         }
-        Q_ASSERT(isInitialized());
     }
 
     ~ScreencastingPrivate()
@@ -98,6 +97,11 @@ Screencasting::Screencasting(QObject *parent)
 }
 
 Screencasting::~Screencasting() = default;
+
+bool Screencasting::isAvailable() const
+{
+    return d && d->isActive();
+}
 
 ScreencastingStream *Screencasting::createOutputStream(QScreen *screen, Screencasting::CursorMode mode)
 {
@@ -138,6 +142,10 @@ ScreencastingStream *Screencasting::createWorkspaceStream(Screencasting::CursorM
 
 ScreencastingStream *Screencasting::createRegionStream(QRect g, qreal scale, Screencasting::CursorMode mode)
 {
+    if (!isAvailable()) {
+        return nullptr;
+    }
+
     auto stream = new ScreencastingStream(this);
     stream->d->init(d->stream_region(g.x(), g.y(), g.width(), g.height(), wl_fixed_from_double(scale), mode));
     stream->d->m_size = g.size();
@@ -146,6 +154,10 @@ ScreencastingStream *Screencasting::createRegionStream(QRect g, qreal scale, Scr
 
 ScreencastingStream *Screencasting::createVirtualMonitorStream(const QString &name, const QSize &resolution, qreal dpr, Screencasting::CursorMode mode)
 {
+    if (!isAvailable()) {
+        return nullptr;
+    }
+
     auto stream = new ScreencastingStream(this);
     stream->d->init(d->stream_virtual_output(name, resolution.width(), resolution.height(), wl_fixed_from_double(dpr), mode));
     stream->d->m_size = resolution;

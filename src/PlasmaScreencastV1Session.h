@@ -33,6 +33,11 @@ public:
     PlasmaScreencastV1Session();
     ~PlasmaScreencastV1Session() override;
 
+    /**
+     * Whether the compositor provides the Plasma screencasting protocol to us.
+     */
+    static bool isAvailable();
+
     void start() override;
     QString virtualOutputName() const override;
 

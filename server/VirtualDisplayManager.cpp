@@ -380,7 +380,9 @@ bool VirtualDisplayManager::applyExclusive(const KScreen::ConfigPtr &config)
         // A physical output got enabled or plugged in while we are exclusive,
         // that means someone is at the computer.
         for (const auto &output : outputs) {
-            if (!isPhysical(output) || !output->isConnected()) {
+            // Other virtual outputs may come and go, e.g. when an application
+            // starts a screencast, only react to hardware.
+            if (!isHardware(output) || !output->isConnected()) {
                 continue;
             }
             if (output->isEnabled() || !m_physicalOutputsAtEntry.contains(output->name())) {
@@ -396,14 +398,16 @@ bool VirtualDisplayManager::applyExclusive(const KScreen::ConfigPtr &config)
     }
 
     for (const auto &output : outputs) {
-        if (isPhysical(output) && output->isConnected() && output->isEnabled()) {
+        if (!isOurs(output) && output->isConnected() && output->isEnabled()) {
             qCInfo(KRDP_DISPLAYS) << "Disabling physical output" << output->name();
             output->setEnabled(false);
             changed = true;
         }
     }
 
-    placeVirtualOutputs(config, 0, 1, changed);
+    QMap<KScreen::OutputPtr, uint32_t> priorities;
+    placeVirtualOutputs(config, 0, priorities, changed);
+    applyPriorities(config, priorities, changed);
     return changed;
 }
 
@@ -415,6 +419,8 @@ bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
     bool changed = false;
     bool anyEnabled = false;
     QRect physicalGeometry;
+    // Saved priorities, used to restore the order of the outputs.
+    QList<std::pair<int, KScreen::OutputPtr>> savedPriorities;
 
     for (const auto &value : saved) {
         const auto entry = value.toObject();
@@ -457,11 +463,7 @@ bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
             changed = true;
         }
 
-        const uint32_t priority = entry[u"priority"_s].toInt(1);
-        if (output->priority() != priority) {
-            config->setOutputPriority(output, priority);
-            changed = true;
-        }
+        savedPriorities.append({entry[u"priority"_s].toInt(), output});
 
         physicalGeometry |= QRect(pos, config->logicalSizeForOutputInt(*output));
     }
@@ -470,7 +472,7 @@ bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
         // The saved layout is unusable, e.g. the monitors were swapped while
         // we were connected. Fall back to enabling whatever is connected.
         for (const auto &output : config->outputs()) {
-            if (isPhysical(output) && output->isConnected() && !output->isEnabled()) {
+            if (!isOurs(output) && output->isConnected() && !output->isEnabled()) {
                 qCInfo(KRDP_DISPLAYS) << "Enabling physical output" << output->name();
                 output->setEnabled(true);
                 changed = true;
@@ -478,14 +480,32 @@ bool VirtualDisplayManager::applySavedLayout(const KScreen::ConfigPtr &config)
         }
     }
 
+    std::ranges::stable_sort(savedPriorities, {}, &std::pair<int, KScreen::OutputPtr>::first);
+    QMap<KScreen::OutputPtr, uint32_t> priorities;
+    for (const auto &[savedPriority, output] : std::as_const(savedPriorities)) {
+        priorities.insert(output, priorities.size() + 1);
+    }
+
     // Remote sessions that are still going continue on their virtual
     // monitors, placed to the right of the physical ones.
-    placeVirtualOutputs(config, physicalGeometry.isValid() ? physicalGeometry.right() + 1 : 0, saved.size() + 1, changed);
+    placeVirtualOutputs(config, physicalGeometry.isValid() ? physicalGeometry.right() + 1 : 0, priorities, changed);
+    applyPriorities(config, priorities, changed);
 
     return changed;
 }
 
-void VirtualDisplayManager::placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, uint32_t priority, bool &changed)
+void VirtualDisplayManager::applyPriorities(const KScreen::ConfigPtr &config, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed)
+{
+    const bool differs = std::ranges::any_of(priorities.asKeyValueRange(), [](const auto &entry) {
+        return entry.first->priority() != entry.second;
+    });
+    if (differs) {
+        config->setOutputPriorities(priorities);
+        changed = true;
+    }
+}
+
+void VirtualDisplayManager::placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed)
 {
     for (const auto &display : m_displays) {
         auto output = display->outputId != -1 ? config->output(display->outputId) : KScreen::OutputPtr();
@@ -501,13 +521,9 @@ void VirtualDisplayManager::placeVirtualOutputs(const KScreen::ConfigPtr &config
             output->setPos(QPoint(x, 0));
             changed = true;
         }
-        if (output->priority() != priority) {
-            config->setOutputPriority(output, priority);
-            changed = true;
-        }
+        priorities.insert(output, priorities.size() + 1);
 
         x += config->logicalSizeForOutputInt(*output).width();
-        ++priority;
     }
 }
 
@@ -600,7 +616,7 @@ void VirtualDisplayManager::saveLayout(const KScreen::ConfigPtr &config)
     m_physicalOutputsAtEntry.clear();
 
     for (const auto &output : config->outputs()) {
-        if (!isPhysical(output) || !output->isConnected()) {
+        if (isOurs(output) || !output->isConnected()) {
             continue;
         }
 
@@ -638,7 +654,16 @@ void VirtualDisplayManager::clearSavedLayout()
     m_physicalOutputsAtEntry.clear();
 }
 
-bool VirtualDisplayManager::isPhysical(const KScreen::OutputPtr &output)
+bool VirtualDisplayManager::isOurs(const KScreen::OutputPtr &output) const
+{
+    const bool managed = std::ranges::any_of(m_displays, [&output](const auto &display) {
+        return display->outputId == output->id();
+    });
+    // Also catches outputs of sessions that are being released.
+    return managed || output->name().startsWith(VirtualOutputPrefix + MonitorNameBase);
+}
+
+bool VirtualDisplayManager::isHardware(const KScreen::OutputPtr &output)
 {
     return !output->name().startsWith(VirtualOutputPrefix);
 }
