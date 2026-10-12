@@ -230,6 +230,28 @@ private Q_SLOTS:
         compareColor(decode(received).pixelColor(10, 10), QColor(245, 0, 0));
     }
 
+    void testBackpressure()
+    {
+        NvencEncoder encoder(QByteArrayLiteral("libx264"));
+        QSignalSpy packets(&encoder, &NvencEncoder::packetReady);
+
+        encoder.encode(solidImage(QSize(64, 48), Qt::red));
+        QVERIFY(packets.wait(5000));
+
+        // Nothing is encoded while the packet was not sent.
+        encoder.encode(solidImage(QSize(64, 48), Qt::green));
+        encoder.encode(solidImage(QSize(64, 48), Qt::blue));
+        QVERIFY(!packets.wait(300));
+        QCOMPARE(packets.count(), 1);
+
+        // Then only the latest frame is.
+        const Packet first = takePacket(packets);
+        const Packet second = takePacket(packets);
+        QVERIFY(!second.data.isEmpty());
+        compareColor(decode({first, second}).pixelColor(10, 10), QColor(0, 0, 255));
+        QVERIFY(!packets.wait(300));
+    }
+
     void testMissingEncoder()
     {
         NvencEncoder encoder(QByteArrayLiteral("does-not-exist"));

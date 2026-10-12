@@ -131,6 +131,11 @@ private:
     void createStream(int monitor);
     void setStreamSize(int monitor, const QSize &size);
     void restartEncoder(int monitor);
+    /**
+     * Have the NVENC encoder of \p monitor send a key frame. Without NVENC,
+     * KPipeWire sends key frames regularly by itself.
+     */
+    void requestKeyFrame(int monitor);
     void refreshMonitor(int monitor);
     void destroySurface(Surface &surface);
     void destroySurfaces();
