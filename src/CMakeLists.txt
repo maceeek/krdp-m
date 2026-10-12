@@ -37,6 +37,8 @@ target_sources(KRdp PRIVATE
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
+    NvencEncoder.cpp
+    NvencEncoder.h
 )
 
 ecm_qt_declare_logging_category(KRdp
@@ -81,6 +83,8 @@ target_link_libraries(KRdp PUBLIC
     K::KPipeWireDmaBuf
     XKB::XKB
 )
+
+target_link_libraries(KRdp PRIVATE PkgConfig::FFmpeg)
 
 set_target_properties(KRdp PROPERTIES
     VERSION ${PROJECT_VERSION}

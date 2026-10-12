@@ -8,14 +8,15 @@
 # To build a different branch, change _branch below.
 
 pkgname=krdp-m-git
-_branch=claude/lucid-franklin-83pwu0
+_branch=claude/vibrant-noether-6w7ton
 pkgver=6.7.5.r0.g0000000
 pkgrel=1
 pkgdesc='KDE RDP server with virtual displays that follow the client (fork of krdp)'
 arch=(x86_64)
 url='https://github.com/maceeek/krdp-m'
 license=(LGPL-2.0-or-later)
-depends=(freerdp
+depends=(ffmpeg
+         freerdp
          gcc-libs
          glibc
          kcmutils
