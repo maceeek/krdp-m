@@ -5,6 +5,7 @@
 #include <QStandardPaths>
 #include <QTest>
 
+#include <KConfigGroup>
 #include <KSharedConfig>
 
 #include <kscreen/backendmanager_p.h>
