@@ -138,8 +138,41 @@ cd krdp-m/packaging/archlinux
 makepkg -si
 ```
 
-This builds the `krdp-m-git` package, which replaces `krdp`. The branch that
-gets built is set by `_branch` in the PKGBUILD.
+This builds the `krdp-m-git` package from the `main` branch, which replaces
+`krdp`. To update it to the latest `main`, run `makepkg -si` again in the same
+directory, then restart krdpserver:
+
+```bash
+cd krdp-m/packaging/archlinux
+git pull
+makepkg -si
+systemctl --user restart app-org.kde.krdpserver.service
+```
+
+### With paru
+
+paru can install and update the package straight from this repository, like
+a package from the AUR. Add it as a PKGBUILD repository to `/etc/paru.conf`:
+
+```ini
+[krdp-m]
+Url = https://github.com/maceeek/krdp-m.git
+Path = packaging/archlinux
+```
+
+Then install it once with paru, so paru knows where it comes from:
+
+```bash
+paru -Sya
+paru -S krdp-m-git
+```
+
+Every commit on `main` is a new version. As it is a `-git` package, paru looks
+for them with `paru -Syu --devel`, or always with plain `paru -Syu` after
+adding `Devel` to the `[options]` of `/etc/paru.conf`. The package is built
+locally against the installed libraries, like any package from the AUR.
+After an update, restart krdpserver with
+`systemctl --user restart app-org.kde.krdpserver.service`.
 
 # KRdp
 
