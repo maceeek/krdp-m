@@ -210,11 +210,10 @@ public:
     std::unique_ptr<Clipboard> clipboard;
     std::unique_ptr<DisplayControl> displayControl;
 
-    // Desktop size and scale the client asked for when connecting.
+    // Monitors the client asked for when connecting.
     // Written from the connection thread, read from the main thread.
-    mutable std::mutex clientDesktopMutex;
-    QSize clientDesktopSize;
-    qreal clientDesktopScale = 1.0;
+    mutable std::mutex clientMonitorsMutex;
+    MonitorLayout clientMonitors;
 
     freerdp_peer *peer = nullptr;
 
@@ -312,16 +311,46 @@ DisplayControl *RdpConnection::displayControl() const
     return d->displayControl.get();
 }
 
-QSize RdpConnection::clientDesktopSize() const
+MonitorLayout RdpConnection::clientMonitorLayout() const
 {
-    std::lock_guard lock(d->clientDesktopMutex);
-    return d->clientDesktopSize;
+    std::lock_guard lock(d->clientMonitorsMutex);
+    return d->clientMonitors;
 }
 
-qreal RdpConnection::clientDesktopScale() const
+static qreal toScale(UINT32 scaleFactor, qreal fallback)
 {
-    std::lock_guard lock(d->clientDesktopMutex);
-    return d->clientDesktopScale;
+    // A percentage in the range 100 - 500, 0 if unset.
+    return scaleFactor >= 100 && scaleFactor <= 500 ? scaleFactor / 100.0 : fallback;
+}
+
+static MonitorLayout readClientMonitors(rdpSettings *settings)
+{
+    const qreal desktopScale = toScale(freerdp_settings_get_uint32(settings, FreeRDP_DesktopScaleFactor), 1.0);
+    const bool hasAttributes = freerdp_settings_get_bool(settings, FreeRDP_HasMonitorAttributes);
+
+    MonitorLayout layout;
+    const UINT32 count = freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount);
+    for (UINT32 i = 0; i < count; ++i) {
+        auto monitor = static_cast<const rdpMonitor *>(freerdp_settings_get_pointer_array(settings, FreeRDP_MonitorDefArray, i));
+        if (!monitor || monitor->width <= 0 || monitor->height <= 0) {
+            continue;
+        }
+        layout.append(Monitor{
+            .rect = QRect(monitor->x, monitor->y, monitor->width, monitor->height),
+            .scale = hasAttributes ? toScale(monitor->attributes.desktopScaleFactor, desktopScale) : desktopScale,
+            .primary = monitor->is_primary != 0,
+        });
+    }
+
+    if (layout.isEmpty()) {
+        layout.append(Monitor{
+            .rect = QRect(0, 0, freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth), freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)),
+            .scale = desktopScale,
+            .primary = true,
+        });
+    }
+
+    return normalized(layout);
 }
 
 Cursor *RdpConnection::cursor() const
@@ -551,16 +580,12 @@ bool RdpConnection::onCapabilities()
 bool RdpConnection::onActivate()
 {
     {
-        auto settings = d->peer->context->settings;
-        const auto scaleFactor = freerdp_settings_get_uint32(settings, FreeRDP_DesktopScaleFactor);
-
-        std::lock_guard lock(d->clientDesktopMutex);
-        // Only remember the size from the first activation, later activations
-        // are the result of us resizing the desktop.
-        if (!d->clientDesktopSize.isValid()) {
-            d->clientDesktopSize = QSize(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth), freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
-            d->clientDesktopScale = scaleFactor >= 100 && scaleFactor <= 500 ? scaleFactor / 100.0 : 1.0;
-            qCDebug(KRDP) << "Client desktop size" << d->clientDesktopSize << "scale" << d->clientDesktopScale;
+        std::lock_guard lock(d->clientMonitorsMutex);
+        // Only remember the monitors from the first activation, later
+        // activations are the result of us resizing the desktop.
+        if (d->clientMonitors.isEmpty()) {
+            d->clientMonitors = readClientMonitors(d->peer->context->settings);
+            qCDebug(KRDP) << "Client monitors" << d->clientMonitors;
         }
     }
 

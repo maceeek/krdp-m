@@ -5,6 +5,7 @@
 
 #include "RdpConnection.h"
 #include "VirtualDisplayManager.h"
+#include <MonitorLayout.h>
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
 #include <functional>
@@ -66,6 +67,12 @@ public Q_SLOTS:
 private:
     void onNewConnection(KRdp::RdpConnection *newConnection);
     void startSession(KRdp::RdpConnection *connection);
+    /**
+     * The first \p count monitors of \p clientLayout, sized so we can
+     * create them.
+     */
+    KRdp::MonitorLayout virtualMonitorLayout(const KRdp::MonitorLayout &clientLayout, int count) const;
+    void applyRequestedLayout(SessionWrapper *wrapper, const KRdp::MonitorLayout &requested);
     void onLocalUserDetected(const QString &reason);
     bool usesVirtualDisplay() const;
     std::unique_ptr<KRdp::AbstractSession> makeSession(bool virtualDisplay);

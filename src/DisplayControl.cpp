@@ -19,24 +19,22 @@ UINT displayControlReceiveMonitorLayout(DispServerContext *context, const DISPLA
         return CHANNEL_RC_BAD_CHANNEL;
     }
 
-    // We only stream a single surface, so use the primary monitor of the
-    // client's layout, or the first one if none is marked primary.
-    const DISPLAY_CONTROL_MONITOR_LAYOUT *monitor = &pdu->Monitors[0];
+    MonitorLayout layout;
     for (UINT32 i = 0; i < pdu->NumMonitors; ++i) {
-        if (pdu->Monitors[i].Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) {
-            monitor = &pdu->Monitors[i];
-            break;
-        }
+        const auto &monitor = pdu->Monitors[i];
+        layout.append(Monitor{
+            .rect = QRect(monitor.Left, monitor.Top, monitor.Width, monitor.Height),
+            // A percentage in the range 100 - 500, 0 if unset.
+            .scale = monitor.DesktopScaleFactor >= 100 && monitor.DesktopScaleFactor <= 500 ? monitor.DesktopScaleFactor / 100.0 : 1.0,
+            .primary = (monitor.Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) != 0,
+        });
     }
+    layout = normalized(layout);
 
-    const QSize size(monitor->Width, monitor->Height);
-    // DesktopScaleFactor is a percentage in the range 100 - 500, 0 if unset.
-    const qreal scale = monitor->DesktopScaleFactor >= 100 && monitor->DesktopScaleFactor <= 500 ? monitor->DesktopScaleFactor / 100.0 : 1.0;
-
-    qCDebug(KRDP) << "Client requested monitor layout" << size << "scale" << scale << "monitors" << pdu->NumMonitors;
+    qCDebug(KRDP) << "Client requested monitor layout" << layout;
 
     auto displayControl = static_cast<DisplayControl *>(context->custom);
-    Q_EMIT displayControl->requestedLayoutChanged(size, scale);
+    Q_EMIT displayControl->requestedLayoutChanged(layout);
 
     return CHANNEL_RC_OK;
 }
@@ -71,7 +69,7 @@ bool DisplayControl::initialize()
     m_dispManager->custom = this;
     m_dispManager->DispMonitorLayout = displayControlReceiveMonitorLayout;
 
-    m_dispManager->MaxNumMonitors = 1;
+    m_dispManager->MaxNumMonitors = MaximumMonitors;
     m_dispManager->MaxMonitorAreaFactorA = DISPLAY_CONTROL_MAX_MONITOR_WIDTH;
     m_dispManager->MaxMonitorAreaFactorB = DISPLAY_CONTROL_MAX_MONITOR_HEIGHT;
 

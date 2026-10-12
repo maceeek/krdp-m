@@ -10,6 +10,8 @@
 #include <QObject>
 #include <QSize>
 
+#include "MonitorLayout.h"
+
 #include <freerdp/freerdp.h>
 
 #include "krdp_export.h"
@@ -106,15 +108,13 @@ public:
     DisplayControl *displayControl() const;
 
     /**
-     * The desktop size the client requested when it connected.
+     * The monitors of the client when it connected, normalized.
      *
-     * Only valid once the connection has been activated.
+     * Clients that do not send their monitors get a single monitor of the
+     * desktop size they asked for. Only valid once the connection has been
+     * activated.
      */
-    QSize clientDesktopSize() const;
-    /**
-     * The desktop scale factor the client requested when it connected, 1.0 if unset.
-     */
-    qreal clientDesktopScale() const;
+    MonitorLayout clientMonitorLayout() const;
 
     NetworkDetection *networkDetection() const;
 

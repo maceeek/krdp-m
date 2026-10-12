@@ -15,6 +15,7 @@
 #include <PipeWireSourceStream>
 #include <freerdp/server/rdpgfx.h>
 
+#include "MonitorLayout.h"
 #include "VideoFrame.h"
 #include "krdp_export.h"
 
@@ -22,6 +23,7 @@ namespace KRdp
 {
 
 class RdpConnection;
+struct Surface;
 
 /**
  * A class that encapsulates an RdpGfx video stream.
@@ -56,7 +58,11 @@ public:
     bool initialize();
     void close();
     Q_SIGNAL void closed();
+    /**
+     * The size of the first monitor changed.
+     */
     Q_SIGNAL void sizeChanged(const QSize &size);
+    Q_SIGNAL void monitorSizeChanged(int monitor, const QSize &size);
     Q_SIGNAL void cursorChanged(const PipeWireCursor &cursor);
 
     /**
@@ -91,6 +97,21 @@ public:
      *           instance. The VideoStream takes ownership of the fd.
      */
     void setPipeWireSource(quint32 nodeId, int fd = -1);
+    /**
+     * Set the PipeWire node to stream the monitor with index \p monitor from.
+     */
+    void setPipeWireSource(int monitor, quint32 nodeId, int fd = -1);
+
+    /**
+     * Set the monitors of the client.
+     *
+     * Every monitor gets its own surface placed at its position, with its
+     * own PipeWire stream set with setPipeWireSource(). The layout must be
+     * normalized. Without a layout there is a single monitor, sized to its
+     * stream.
+     */
+    void setMonitorLayout(const MonitorLayout &layout);
+    int monitorCount() const;
 
     bool openChannel();
 
@@ -103,16 +124,22 @@ private:
     uint32_t onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdvertise);
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
 
-    void onPacketReceived(const PipeWireEncodedStream::Packet &data);
-    void onFrameReceived(const PipeWireFrame &frame);
+    void onPacketReceived(int monitor, const PipeWireEncodedStream::Packet &data);
+    void onFrameReceived(int monitor, const PipeWireFrame &frame);
+    void onCursorChanged(int monitor, const PipeWireCursor &cursor);
     void setActiveEncodingMode(EncodingMode mode);
-    void restartEncoder();
-    void destroySurface();
-    void performReset(QSize size);
+    void createStream(int monitor);
+    void setStreamSize(int monitor, const QSize &size);
+    void restartEncoder(int monitor);
+    void refreshMonitor(int monitor);
+    void destroySurface(Surface &surface);
+    void destroySurfaces();
+    bool createSurface(int monitor);
+    void performReset(const QRect &desktop, int monitor);
     bool hasInFlightCapacity() const;
     void sendFrame(const VideoFrame &frame);
-    void sendFrameH264(const VideoFrame &frame);
-    void sendFrameProgressive(const VideoFrame &frame);
+    void sendFrameH264(const VideoFrame &frame, const Surface &surface);
+    void sendFrameProgressive(const VideoFrame &frame, const Surface &surface);
 
     void updateRequestedFrameRate();
 

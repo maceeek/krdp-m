@@ -4,11 +4,13 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <QElapsedTimer>
 #include <QMap>
 #include <QObject>
+#include <QPoint>
 #include <QPointer>
 #include <QSize>
 #include <QTimer>
@@ -81,8 +83,12 @@ public:
      *
      * \param size The size the virtual monitor should have, in pixels.
      * \param scale The scale the virtual monitor should have.
+     * \param group The monitors of one client, they are placed together.
+     *               Defaults to the session itself.
+     * \param position Position of the monitor within its group, in logical
+     *                 coordinates.
      */
-    void addSession(KRdp::AbstractSession *session, const QSize &size, qreal scale);
+    void addSession(KRdp::AbstractSession *session, const QSize &size, qreal scale, const void *group = nullptr, const QPoint &position = QPoint());
 
     /**
      * Request a new size and scale for the virtual monitor of a session.
@@ -90,7 +96,7 @@ public:
      * Requests are debounced, as clients send a lot of them while their
      * window is being resized.
      */
-    void requestLayout(KRdp::AbstractSession *session, const QSize &size, qreal scale);
+    void requestLayout(KRdp::AbstractSession *session, const QSize &size, qreal scale, std::optional<QPoint> position = std::nullopt);
 
     /**
      * Unregister a session.
@@ -138,8 +144,12 @@ private:
         int outputId = -1;
         QSize size;
         qreal scale = 1.0;
+        // Not dereferenced, only identifies the monitors of one client.
+        const void *group = nullptr;
+        QPoint position;
         QSize pendingSize;
         qreal pendingScale = 1.0;
+        QPoint pendingPosition;
         std::unique_ptr<QTimer> debounce;
     };
 
@@ -155,6 +165,7 @@ private:
     bool applyExclusive(const KScreen::ConfigPtr &config);
     bool applySavedLayout(const KScreen::ConfigPtr &config);
     bool applyDisplayModes(const KScreen::ConfigPtr &config);
+    bool applyExtended(const KScreen::ConfigPtr &config);
     /**
      * Enable our virtual outputs and place them next to each other starting
      * at \p x, their priorities are appended to \p priorities.

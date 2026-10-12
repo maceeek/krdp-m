@@ -7,6 +7,8 @@
 #include <QObject>
 #include <QSize>
 
+#include "MonitorLayout.h"
+
 #include <freerdp/server/disp.h>
 
 #include "krdp_export.h"
@@ -28,6 +30,11 @@ class KRDP_EXPORT DisplayControl : public QObject
 {
     Q_OBJECT
 public:
+    /**
+     * The maximum number of monitors a client can use, the limit of RDP.
+     */
+    static constexpr int MaximumMonitors = 16;
+
     explicit DisplayControl(RdpConnection *session);
     ~DisplayControl() override;
 
@@ -44,14 +51,11 @@ Q_SIGNALS:
     /**
      * Emitted when the client requests a new monitor layout.
      *
-     * Only the primary monitor of the client layout is used.
-     *
-     * \param size The requested size in physical pixels.
-     * \param scale The requested desktop scale factor, 1.0 for 100%.
+     * \param layout The requested monitors, normalized.
      *
      * \note This is emitted from the RDP connection thread.
      */
-    void requestedLayoutChanged(const QSize &size, qreal scale);
+    void requestedLayoutChanged(const KRdp::MonitorLayout &layout);
 
 private:
     friend UINT displayControlReceiveMonitorLayout(DispServerContext *context, const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu);

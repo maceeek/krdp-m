@@ -149,10 +149,13 @@ QString VirtualDisplayManager::allocateMonitorName() const
     }
 }
 
-void VirtualDisplayManager::addSession(KRdp::AbstractSession *session, const QSize &size, qreal scale)
+void VirtualDisplayManager::addSession(KRdp::AbstractSession *session, const QSize &size, qreal scale, const void *group, const QPoint &position)
 {
     auto display = std::make_unique<Display>();
     display->session = session;
+    display->group = group ? group : session;
+    display->position = position;
+    display->pendingPosition = position;
     display->outputName = session->virtualOutputName();
     // Only the Plasma session knows the exact name of its output.
     display->prefixMatch = !display->outputName.startsWith(VirtualOutputPrefix + MonitorNameBase);
@@ -164,24 +167,28 @@ void VirtualDisplayManager::addSession(KRdp::AbstractSession *session, const QSi
 
     auto rawDisplay = display.get();
     connect(display->debounce.get(), &QTimer::timeout, this, [this, rawDisplay]() {
-        if (rawDisplay->pendingSize == rawDisplay->size && sameScale(rawDisplay->pendingScale, rawDisplay->scale)) {
+        if (rawDisplay->pendingSize == rawDisplay->size && sameScale(rawDisplay->pendingScale, rawDisplay->scale)
+            && rawDisplay->pendingPosition == rawDisplay->position) {
             return;
         }
-        qCInfo(KRDP_DISPLAYS) << "Resizing virtual monitor" << rawDisplay->outputName << "to" << rawDisplay->pendingSize << "scale" << rawDisplay->pendingScale;
+        qCInfo(KRDP_DISPLAYS) << "Resizing virtual monitor" << rawDisplay->outputName << "to" << rawDisplay->pendingSize << "scale" << rawDisplay->pendingScale
+                              << "at" << rawDisplay->pendingPosition;
         rawDisplay->size = rawDisplay->pendingSize;
         rawDisplay->scale = rawDisplay->pendingScale;
+        rawDisplay->position = rawDisplay->pendingPosition;
         m_attempts = 0;
         scheduleReconcile();
     });
 
-    qCInfo(KRDP_DISPLAYS) << "Virtual monitor" << display->outputName << "requested at" << display->size << "scale" << scale << "mode" << m_mode;
+    qCInfo(KRDP_DISPLAYS) << "Virtual monitor" << display->outputName << "requested at" << display->size << "scale" << scale << "position" << position << "mode"
+                          << m_mode;
 
     m_displays.push_back(std::move(display));
     m_attempts = 0;
     scheduleReconcile();
 }
 
-void VirtualDisplayManager::requestLayout(KRdp::AbstractSession *session, const QSize &size, qreal scale)
+void VirtualDisplayManager::requestLayout(KRdp::AbstractSession *session, const QSize &size, qreal scale, std::optional<QPoint> position)
 {
     auto it = std::ranges::find_if(m_displays, [session](const auto &display) {
         return display->session == session;
@@ -192,6 +199,7 @@ void VirtualDisplayManager::requestLayout(KRdp::AbstractSession *session, const 
 
     (*it)->pendingSize = sanitizeSize(size);
     (*it)->pendingScale = scale > 0 ? scale : 1.0;
+    (*it)->pendingPosition = position.value_or((*it)->position);
     (*it)->debounce->start();
 }
 
@@ -337,6 +345,8 @@ void VirtualDisplayManager::reconcile()
         changed = applyExclusive(config);
     } else if (m_haveSavedLayout) {
         changed = applySavedLayout(config);
+    } else if (m_mode != Mode::Disabled) {
+        changed = applyExtended(config);
     }
 
     if (applyDisplayModes(config)) {
@@ -511,25 +521,68 @@ void VirtualDisplayManager::applyPriorities(const KScreen::ConfigPtr &config, QM
     }
 }
 
-void VirtualDisplayManager::placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed)
+bool VirtualDisplayManager::applyExtended(const KScreen::ConfigPtr &config)
 {
-    for (const auto &display : m_displays) {
-        auto output = display->outputId != -1 ? config->output(display->outputId) : KScreen::OutputPtr();
-        if (!output) {
+    // Place our outputs to the right of everything else that is enabled.
+    int x = 0;
+    QList<KScreen::OutputPtr> others;
+    for (const auto &output : config->outputs()) {
+        if (isOurs(output) || !output->isConnected() || !output->isEnabled()) {
             continue;
         }
+        x = std::max(x, output->pos().x() + config->logicalSizeForOutputInt(*output).width());
+        others.append(output);
+    }
 
-        if (!output->isEnabled()) {
-            output->setEnabled(true);
-            changed = true;
-        }
-        if (output->pos() != QPoint(x, 0)) {
-            output->setPos(QPoint(x, 0));
-            changed = true;
-        }
+    std::ranges::stable_sort(others, {}, &KScreen::Output::priority);
+    QMap<KScreen::OutputPtr, uint32_t> priorities;
+    for (const auto &output : std::as_const(others)) {
         priorities.insert(output, priorities.size() + 1);
+    }
 
-        x += config->logicalSizeForOutputInt(*output).width();
+    bool changed = false;
+    const int otherCount = priorities.size();
+    placeVirtualOutputs(config, x, priorities, changed);
+    // Only touch priorities once we have something to place.
+    if (priorities.size() > otherCount) {
+        applyPriorities(config, priorities, changed);
+    }
+    return changed;
+}
+
+void VirtualDisplayManager::placeVirtualOutputs(const KScreen::ConfigPtr &config, int x, QMap<KScreen::OutputPtr, uint32_t> &priorities, bool &changed)
+{
+    // The monitors of one client are placed like they are on the client,
+    // clients are placed next to each other.
+    QList<const void *> groups;
+    for (const auto &display : m_displays) {
+        if (!groups.contains(display->group)) {
+            groups.append(display->group);
+        }
+    }
+
+    for (const void *group : std::as_const(groups)) {
+        int groupWidth = 0;
+        for (const auto &display : m_displays) {
+            auto output = display->group == group && display->outputId != -1 ? config->output(display->outputId) : KScreen::OutputPtr();
+            if (!output) {
+                continue;
+            }
+
+            if (!output->isEnabled()) {
+                output->setEnabled(true);
+                changed = true;
+            }
+            const QPoint pos = QPoint(x, 0) + display->position;
+            if (output->pos() != pos) {
+                output->setPos(pos);
+                changed = true;
+            }
+            priorities.insert(output, priorities.size() + 1);
+
+            groupWidth = std::max(groupWidth, display->position.x() + config->logicalSizeForOutputInt(*output).width());
+        }
+        x += groupWidth;
     }
 }
 

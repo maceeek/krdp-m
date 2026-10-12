@@ -30,6 +30,8 @@ target_sources(KRdp PRIVATE
     VideoStream.cpp
     VideoStream.h
     Cursor.cpp
+    MonitorLayout.cpp
+    MonitorLayout.h
     DisplayControl.cpp
     DisplayControl.h
     Cursor.h

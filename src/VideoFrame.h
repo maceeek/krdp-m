@@ -24,6 +24,10 @@ class RdpConnection;
  */
 struct VideoFrame {
     /**
+     * The monitor this frame is for.
+     */
+    int monitor = 0;
+    /**
      * The size of the frame, in pixels.
      */
     QSize size;

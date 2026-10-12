@@ -12,3 +12,7 @@ add_executable(virtualdisplaymanagertest virtualdisplaymanagertest.cpp ${CMAKE_S
 target_include_directories(virtualdisplaymanagertest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(virtualdisplaymanagertest PRIVATE Qt6::Test KRdp KF6::Screen KF6::ConfigCore)
 add_test(NAME virtualdisplaymanagertest COMMAND virtualdisplaymanagertest)
+
+add_executable(monitorlayouttest monitorlayouttest.cpp)
+target_link_libraries(monitorlayouttest PRIVATE Qt6::Test KRdp)
+add_test(NAME monitorlayouttest COMMAND monitorlayouttest)

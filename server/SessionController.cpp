@@ -7,6 +7,7 @@
 #include <QCoreApplication>
 #include <QDBusInterface>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QTimer>
 
 #include <KLocalizedString>
@@ -24,35 +25,107 @@
 #ifdef WITH_PLASMA_SESSION
 #include <PlasmaScreencastV1Session.h>
 #endif
+#include <MonitorLayout.h>
 
 #include "LocalPresenceMonitor.h"
 #include "VideoStream.h"
 
 using namespace Qt::StringLiterals;
 
+static bool plasmaScreencastAvailable()
+{
+#ifdef WITH_PLASMA_SESSION
+    return KRdp::PlasmaScreencastV1Session::isAvailable();
+#else
+    return false;
+#endif
+}
+
+/**
+ * The sessions streaming to one RDP connection, one for every monitor of the
+ * client.
+ */
 class SessionWrapper : public QObject
 {
     Q_OBJECT
 public:
-    SessionWrapper(KRdp::RdpConnection *conn, std::unique_ptr<KRdp::AbstractSession> &&sess, KStatusNotifierItem *sni)
-        : session(std::move(sess))
-        , connection(conn)
+    SessionWrapper(KRdp::RdpConnection *conn, KStatusNotifierItem *sni)
+        : connection(conn)
     {
         m_sni = sni;
 
-        connect(session.get(), &KRdp::AbstractSession::error, this, &SessionWrapper::sessionError);
-        connect(session.get(), &KRdp::AbstractSession::started, this, &SessionWrapper::onSessionStarted);
-        connect(session.get(), &KRdp::AbstractSession::clipboardDataChanged, connection->clipboard(), &KRdp::Clipboard::setServerData);
-
         connect(connection->videoStream(), &KRdp::VideoStream::cursorChanged, this, &SessionWrapper::onCursorUpdate);
-        connect(connection->videoStream(), &KRdp::VideoStream::sizeChanged, session.get(), &KRdp::AbstractSession::setSize);
+        connect(connection->videoStream(), &KRdp::VideoStream::monitorSizeChanged, this, [this](int monitor, const QSize &size) {
+            if (monitor >= 0 && monitor < int(sessions.size())) {
+                sessions.at(monitor)->setSize(size);
+            }
+        });
         connect(connection->videoStream(), &KRdp::VideoStream::enabledChanged, this, &SessionWrapper::onVideoStreamEnabledChanged);
-        connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, session.get(), &KRdp::AbstractSession::sendEvent);
-        connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, session.get(), [clipboard = connection->clipboard(), this]() {
-            session->setClipboardData(clipboard->getClipboard());
+        connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, this, &SessionWrapper::routeInput);
+        connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, this, [clipboard = connection->clipboard(), this]() {
+            if (!sessions.empty()) {
+                sessions.front()->setClipboardData(clipboard->getClipboard());
+            }
         });
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+    }
+
+    /**
+     * Add the session streaming the next monitor.
+     */
+    void addSession(std::unique_ptr<KRdp::AbstractSession> &&session)
+    {
+        const int monitor = sessions.size();
+        connect(session.get(), &KRdp::AbstractSession::error, this, &SessionWrapper::sessionError);
+        connect(session.get(), &KRdp::AbstractSession::started, this, [this, monitor]() {
+            onSessionStarted(monitor);
+        });
+        if (monitor == 0) {
+            connect(session.get(), &KRdp::AbstractSession::clipboardDataChanged, connection->clipboard(), &KRdp::Clipboard::setServerData);
+        }
+        sessions.push_back(std::move(session));
+    }
+
+    /**
+     * The monitors of the client, used to send pointer input to the session
+     * of the monitor it is on.
+     */
+    void setLayout(const KRdp::MonitorLayout &newLayout)
+    {
+        layout = newLayout;
+    }
+
+    void routeInput(const std::shared_ptr<QEvent> &event)
+    {
+        if (sessions.empty()) {
+            return;
+        }
+        if (sessions.size() == 1) {
+            sessions.front()->sendEvent(event);
+            return;
+        }
+
+        switch (event->type()) {
+        case QEvent::MouseMove: {
+            auto mouseEvent = std::static_pointer_cast<QMouseEvent>(event);
+            const QPointF position = mouseEvent->position();
+            m_pointerMonitor = std::min<int>(KRdp::monitorAt(layout, position), sessions.size() - 1);
+            const QPointF local = position - QPointF(layout.value(m_pointerMonitor).rect.topLeft());
+            auto localEvent = std::make_shared<QMouseEvent>(QEvent::MouseMove, local, local, mouseEvent->button(), mouseEvent->buttons(), mouseEvent->modifiers());
+            sessions.at(m_pointerMonitor)->sendEvent(localEvent);
+            break;
+        }
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::Wheel:
+            sessions.at(m_pointerMonitor)->sendEvent(event);
+            break;
+        default:
+            // Keyboard input does not depend on the monitor.
+            sessions.front()->sendEvent(event);
+            break;
+        }
     }
 
     void onCursorUpdate(const PipeWireCursor &cursor)
@@ -72,10 +145,11 @@ public:
         connection->videoStream()->setStreamingEnabled(m_sessionStarted && connection->videoStream()->enabled());
     }
 
-    void onSessionStarted()
+    void onSessionStarted(int monitor)
     {
         m_sessionStarted = true;
-        connection->videoStream()->setPipeWireSource(session->nodeId(), session->takePipeWireFd());
+        auto &session = sessions.at(monitor);
+        connection->videoStream()->setPipeWireSource(monitor, session->nodeId(), session->takePipeWireFd());
         connection->videoStream()->setStreamingEnabled(connection->videoStream()->enabled());
     }
 
@@ -87,11 +161,13 @@ public:
     Q_SIGNAL void sessionError();
     Q_SIGNAL void connectionDestroyed(SessionWrapper *wrapper);
 
-    std::unique_ptr<KRdp::AbstractSession> session;
+    std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
+    KRdp::MonitorLayout layout;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
     bool m_sessionStarted = false;
     bool usesVirtualDisplay = false;
+    int m_pointerMonitor = 0;
 };
 
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
@@ -192,41 +268,69 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     });
 }
 
+KRdp::MonitorLayout SessionController::virtualMonitorLayout(const KRdp::MonitorLayout &clientLayout, int count) const
+{
+    KRdp::MonitorLayout layout = clientLayout.mid(0, count);
+    for (auto &monitor : layout) {
+        monitor.rect.setSize(m_virtualDisplays->sanitizeSize(monitor.rect.size()));
+    }
+    return KRdp::normalized(layout);
+}
+
 void SessionController::startSession(KRdp::RdpConnection *connection)
 {
     const bool virtualDisplay = usesVirtualDisplay();
 
-    auto wrapper = std::make_unique<SessionWrapper>(connection, makeSession(virtualDisplay), m_sni);
+    auto wrapper = std::make_unique<SessionWrapper>(connection, m_sni);
     if (virtualDisplay) {
-        KRdp::VirtualMonitor monitor;
-        monitor.name = m_virtualDisplays->allocateMonitorName();
+        // A virtual monitor for every monitor of the client. That needs the
+        // Plasma protocols, the portal can only create a single one.
+        KRdp::MonitorLayout clientLayout = connection->clientMonitorLayout();
         if (m_virtualMonitor) {
-            monitor.size = m_virtualMonitor->size;
-            monitor.dpr = m_virtualMonitor->dpr;
-        } else {
-            monitor.size = connection->clientDesktopSize();
-            monitor.dpr = connection->clientDesktopScale();
+            clientLayout = {KRdp::Monitor{.rect = QRect(QPoint(), m_virtualMonitor->size), .scale = m_virtualMonitor->dpr, .primary = true}};
         }
-        monitor.size = m_virtualDisplays->sanitizeSize(monitor.size);
+        const bool multipleSupported = plasmaScreencastAvailable();
+        if (clientLayout.size() > 1 && !multipleSupported) {
+            qWarning() << "The client has" << clientLayout.size() << "monitors, only using the primary one as the Plasma screencasting protocol is not available";
+        }
+        const int count = multipleSupported ? std::min<int>(clientLayout.size(), KRdp::DisplayControl::MaximumMonitors) : 1;
+        const auto layout = virtualMonitorLayout(clientLayout, count);
+        const auto positions = KRdp::logicalPositions(layout);
+        qInfo() << "Creating virtual monitors" << layout;
 
-        wrapper->session->setVirtualMonitor(monitor);
         wrapper->usesVirtualDisplay = true;
-        m_virtualDisplays->addSession(wrapper->session.get(), monitor.size, monitor.dpr);
+        wrapper->setLayout(layout);
+        connection->videoStream()->setMonitorLayout(layout);
+
+        for (int i = 0; i < layout.size(); ++i) {
+            auto session = makeSession(true);
+            KRdp::VirtualMonitor monitor;
+            monitor.name = m_virtualDisplays->allocateMonitorName();
+            monitor.size = layout[i].rect.size();
+            monitor.dpr = layout[i].scale;
+            session->setVirtualMonitor(monitor);
+            m_virtualDisplays->addSession(session.get(), monitor.size, monitor.dpr, wrapper.get(), positions[i]);
+            wrapper->addSession(std::move(session));
+        }
 
         if (!m_virtualMonitor) {
-            auto session = wrapper->session.get();
-            connect(connection->displayControl(), &KRdp::DisplayControl::requestedLayoutChanged, wrapper.get(), [this, session](const QSize &size, qreal scale) {
-                m_virtualDisplays->requestLayout(session, size, scale);
+            connect(connection->displayControl(), &KRdp::DisplayControl::requestedLayoutChanged, wrapper.get(), [this, wrapper = wrapper.get()](const KRdp::MonitorLayout &requested) {
+                applyRequestedLayout(wrapper, requested);
             });
         }
-    } else if (m_monitorIndex) {
-        wrapper->session->setActiveStream(*m_monitorIndex);
+    } else {
+        wrapper->addSession(makeSession(false));
+        if (m_monitorIndex) {
+            wrapper->sessions.front()->setActiveStream(*m_monitorIndex);
+        }
     }
 
     connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, m_localPresence, &LocalPresenceMonitor::noteRemoteInput);
 
     wrapper->connection->videoStream()->setVideoQuality(m_quality.value());
-    wrapper->session->start();
+    for (const auto &session : wrapper->sessions) {
+        session->start();
+    }
 
     connect(wrapper.get(), &SessionWrapper::connectionDestroyed, this, [this](SessionWrapper *wrapper) {
         auto it = std::ranges::find_if(m_wrappers, [wrapper](const auto &entry) {
@@ -240,9 +344,11 @@ void SessionController::startSession(KRdp::RdpConnection *connection)
         m_wrappers.erase(it);
 
         if (owned->usesVirtualDisplay) {
-            // Keeps the virtual monitor around until the physical monitors
+            // Keeps the virtual monitors around until the physical monitors
             // are back, so the desktop always has somewhere to go.
-            m_virtualDisplays->removeSession(std::move(owned->session));
+            for (auto &session : owned->sessions) {
+                m_virtualDisplays->removeSession(std::move(session));
+            }
         }
         // We are called from a signal of the wrapper.
         owned.release()->deleteLater();
@@ -253,6 +359,31 @@ void SessionController::startSession(KRdp::RdpConnection *connection)
     });
 
     m_wrappers.push_back(std::move(wrapper));
+}
+
+void SessionController::applyRequestedLayout(SessionWrapper *wrapper, const KRdp::MonitorLayout &requested)
+{
+    const int count = wrapper->sessions.size();
+    if (requested.isEmpty()) {
+        return;
+    }
+    if (requested.size() != count) {
+        if (count != 1) {
+            qWarning() << "The client changed from" << count << "to" << requested.size()
+                       << "monitors, changing the number of monitors needs a reconnect";
+            return;
+        }
+        // With a single virtual monitor, follow the primary monitor.
+    }
+
+    const auto layout = virtualMonitorLayout(requested, count);
+    const auto positions = KRdp::logicalPositions(layout);
+
+    wrapper->setLayout(layout);
+    wrapper->connection->videoStream()->setMonitorLayout(layout);
+    for (int i = 0; i < count; ++i) {
+        m_virtualDisplays->requestLayout(wrapper->sessions.at(i).get(), layout[i].rect.size(), layout[i].scale, positions[i]);
+    }
 }
 
 void SessionController::ReturnLocalDisplays()
@@ -325,7 +456,7 @@ std::unique_ptr<KRdp::AbstractSession> SessionController::makeSession(bool virtu
 #ifdef WITH_PLASMA_SESSION
     // The Plasma protocols let us name the virtual output and create it at
     // the right size directly, without a portal dialog.
-    if (m_sessionType == SessionType::Plasma || (virtualDisplay && KRdp::PlasmaScreencastV1Session::isAvailable())) {
+    if (m_sessionType == SessionType::Plasma || (virtualDisplay && plasmaScreencastAvailable())) {
         return std::make_unique<KRdp::PlasmaScreencastV1Session>();
     } else
 #endif
