@@ -2,7 +2,8 @@
 
 KRdp-M is a fork of [KRdp](https://invent.kde.org/plasma/krdp), the RDP server
 of KDE Plasma, based on its Plasma 6.7 branch. It adds virtual displays that
-follow the RDP client, see [Virtual displays](#virtual-displays) below.
+follow the RDP client, see [Virtual displays](#virtual-displays) below, and
+[hardware encoding on NVIDIA GPUs](#hardware-encoding-on-nvidia-gpus).
 
 It builds against the libraries of Plasma 6.7 and replaces the `krdp` package,
 for Arch Linux and CachyOS see [Installing on Arch Linux and CachyOS](#installing-on-arch-linux-and-cachyos).
@@ -97,7 +98,31 @@ systemctl --user restart app-org.kde.krdpserver.service
   available (it is for krdpserver started through its systemd unit or desktop
   file), the remote desktop portal otherwise.
 
-### Debugging
+## Hardware encoding on NVIDIA GPUs
+
+KRdp encodes H.264 with KPipeWire, which only does hardware encoding through
+VAAPI. The NVIDIA driver has no VAAPI encoding, so upstream KRdp encodes in
+software on NVIDIA GPUs. KRdp-M encodes with NVENC instead, through FFmpeg:
+
+- It is used automatically when the NVIDIA driver is loaded and FFmpeg was
+  built with NVENC (it is on Arch Linux and CachyOS), for clients using H.264.
+- If NVENC does not work, e.g. because the GPU has no NVENC, KPipeWire takes
+  over for the rest of the session.
+- The frames are converted to YUV on the CPU, with up to 4 threads, because
+  NVENC would convert them to limited range colors that RDP clients show
+  washed out. The encoding itself is done by the GPU.
+- Set `KRDP_DISABLE_NVENC=1` in the environment of krdpserver to use KPipeWire
+  anyway, e.g. with `systemctl --user edit app-org.kde.krdpserver.service`:
+
+  ```ini
+  [Service]
+  Environment=KRDP_DISABLE_NVENC=1
+  ```
+
+The log of krdpserver says `Encoding monitor 0 with NVENC` when NVENC is used,
+see [Debugging](#debugging).
+
+## Debugging
 
 ```bash
 QT_LOGGING_RULES="org.kde.krdp*=true" krdpserver

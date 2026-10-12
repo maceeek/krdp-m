@@ -29,6 +29,7 @@
 #include <qassert.h>
 
 #include "NetworkDetection.h"
+#include "NvencEncoder.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
 
@@ -150,6 +151,8 @@ public:
 
         std::unique_ptr<PipeWireEncodedStream> encodedStream;
         std::unique_ptr<PipeWireSourceStream> sourceStream;
+        // Encodes the frames of sourceStream for H.264 on NVIDIA GPUs.
+        std::unique_ptr<NvencEncoder> nvencEncoder;
         quint32 nodeId = 0;
         int pipeWireFd = -1;
         QSize size;
@@ -196,6 +199,8 @@ public:
     // The monitor the cursor was last seen on.
     int cursorMonitor = 0;
     DmaBufHandler dmaBufHandler;
+    // NVENC did not work, KPipeWire encodes instead.
+    bool nvencFailed = false;
 
     RdpGfxContextPtr gfxContext = RdpGfxContextPtr(nullptr, rdpgfx_server_context_free);
     ProgressiveContextPtr progressive = ProgressiveContextPtr(nullptr, progressive_context_free);
@@ -331,13 +336,16 @@ void VideoStream::createStream(int monitor)
         stream.sourceStream->setActive(false);
         stream.sourceStream.reset();
     }
+    stream.nvencEncoder.reset();
     stream.encoderRestartPending = false;
 
     if (!d->activeEncodingMode) {
         return;
     }
 
-    if (*d->activeEncodingMode == EncodingMode::H264) {
+    const bool useNvenc = *d->activeEncodingMode == EncodingMode::H264 && NvencEncoder::isAvailable() && !d->nvencFailed;
+
+    if (*d->activeEncodingMode == EncodingMode::H264 && !useNvenc) {
         stream.encodedStream = std::make_unique<PipeWireEncodedStream>();
         stream.encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
         stream.encodedStream->setColorRange(PipeWireBaseEncodedStream::ColorRange::Full);
@@ -379,6 +387,38 @@ void VideoStream::createStream(int monitor)
             stream.encodedStream->start();
         }
     } else {
+        if (useNvenc) {
+            qCInfo(KRDP) << "Encoding monitor" << monitor << "with NVENC";
+            stream.nvencEncoder = std::make_unique<NvencEncoder>();
+            stream.nvencEncoder->setQuality(d->quality);
+            // Queued to the encoder, so packets of an encoder that was
+            // replaced are dropped with it.
+            connect(stream.nvencEncoder.get(),
+                    &NvencEncoder::packetReady,
+                    stream.nvencEncoder.get(),
+                    [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size) {
+                        VideoFrame frame;
+                        frame.monitor = monitor;
+                        frame.size = size;
+                        frame.data = data;
+                        frame.isKeyFrame = isKeyFrame;
+                        queueFrame(frame);
+                    });
+            connect(stream.nvencEncoder.get(), &NvencEncoder::failed, stream.nvencEncoder.get(), [this]() {
+                qCWarning(KRDP) << "NVENC does not work, falling back to KPipeWire for H.264 encoding";
+                d->nvencFailed = true;
+                // Not from within a signal of the encoder that gets destroyed.
+                QMetaObject::invokeMethod(
+                    this,
+                    [this]() {
+                        for (std::size_t monitor = 0; monitor < d->streams.size(); ++monitor) {
+                            createStream(monitor);
+                        }
+                    },
+                    Qt::QueuedConnection);
+            });
+        }
+
         stream.sourceStream = std::make_unique<PipeWireSourceStream>();
         stream.sourceStream->setAllowDmaBuf(true);
         stream.sourceStream->setDamageEnabled(true);
@@ -444,6 +484,11 @@ VideoStream::~VideoStream()
 void VideoStream::restartEncoder(int monitor)
 {
     if (monitor < 0 || monitor >= int(d->streams.size()) || d->activeEncodingMode != EncodingMode::H264) {
+        return;
+    }
+
+    if (const auto &encoder = d->streams.at(monitor)->nvencEncoder) {
+        encoder->requestKeyFrame();
         return;
     }
 
@@ -698,6 +743,9 @@ void VideoStream::setVideoQuality(quint8 quality)
         if (stream->encodedStream) {
             stream->encodedStream->setQuality(quality);
         }
+        if (stream->nvencEncoder) {
+            stream->nvencEncoder->setQuality(quality);
+        }
     }
 }
 
@@ -909,9 +957,15 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
         return;
     }
 
-    if (monitor < int(d->streams.size())) {
-        d->streams.at(monitor)->lastImage = frameData.image;
+    if (monitor >= int(d->streams.size())) {
+        return;
     }
+    auto &stream = *d->streams.at(monitor);
+    if (stream.nvencEncoder) {
+        stream.nvencEncoder->encode(frameData.image);
+        return;
+    }
+    stream.lastImage = frameData.image;
     queueFrame(frameData);
 }
 
@@ -1112,11 +1166,27 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     // A different desktop size needs a reset of the whole graphics pipeline,
     // otherwise only the surface of this monitor needs to change.
     const QRect desktop = d->desktopRect();
+    bool newSurface = true;
     if (d->pendingReset || desktop != d->desktop) {
         d->pendingReset = false;
         performReset(desktop, frame.monitor);
     } else if (output.surface.size != frame.size || output.surface.id == 0) {
         createSurface(frame.monitor);
+    } else {
+        newSurface = false;
+    }
+
+    if (newSurface && d->activeEncodingMode == EncodingMode::H264 && !frame.isKeyFrame) {
+        // The client can't decode this frame on a new surface. NVENC rarely
+        // sends key frames by itself, so ask for one.
+        QMetaObject::invokeMethod(
+            this,
+            [this, monitor = frame.monitor]() {
+                if (monitor < int(d->streams.size()) && d->streams.at(monitor)->nvencEncoder) {
+                    d->streams.at(monitor)->nvencEncoder->requestKeyFrame();
+                }
+            },
+            Qt::QueuedConnection);
     }
 
     if (d->activeEncodingMode == EncodingMode::H264) {

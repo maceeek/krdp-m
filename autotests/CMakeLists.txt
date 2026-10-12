@@ -16,3 +16,7 @@ add_test(NAME virtualdisplaymanagertest COMMAND virtualdisplaymanagertest)
 add_executable(monitorlayouttest monitorlayouttest.cpp)
 target_link_libraries(monitorlayouttest PRIVATE Qt6::Test KRdp)
 add_test(NAME monitorlayouttest COMMAND monitorlayouttest)
+
+add_executable(nvencencodertest nvencencodertest.cpp)
+target_link_libraries(nvencencodertest PRIVATE Qt6::Test KRdp PkgConfig::FFmpeg)
+add_test(NAME nvencencodertest COMMAND nvencencodertest)
