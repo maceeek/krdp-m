@@ -24,7 +24,7 @@ namespace KRdp
  * encodes raw frames from a PipeWireSourceStream instead.
  *
  * Frames are encoded on a thread of their own. When frames come in faster
- * than they can be encoded only the latest one is kept. Every frame is
+ * than they can be encoded or sent only the latest one is kept. Every frame is
  * encoded as a whole into the same Baseline profile, full range BT.601
  * stream KPipeWire produces for KRdp.
  */
@@ -67,8 +67,11 @@ public:
 
     /**
      * A frame of \p size was encoded. Emitted from the encoding thread.
+     *
+     * Keep \p sent until the packet was sent to the client or dropped. Until
+     * then no other frame is encoded, so frames don't queue up.
      */
-    Q_SIGNAL void packetReady(const QByteArray &data, bool isKeyFrame, const QSize &size);
+    Q_SIGNAL void packetReady(const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent);
     /**
      * The encoder could not be set up or stopped working, nothing will be
      * encoded anymore. Emitted from the encoding thread.

@@ -52,5 +52,10 @@ struct VideoFrame {
      * When was this frame presented.
      */
     std::chrono::system_clock::time_point presentationTimeStamp;
+    /**
+     * Released when the last copy of the frame is gone, i.e. it was sent or
+     * dropped, to let the encoder know.
+     */
+    std::shared_ptr<void> sent;
 };
 }

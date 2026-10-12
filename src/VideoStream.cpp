@@ -18,6 +18,7 @@
 
 #include <QDateTime>
 #include <QQueue>
+#include <QScopeGuard>
 #include <QSet>
 
 #include <DmaBufHandler>
@@ -223,6 +224,8 @@ public:
 
     std::jthread frameSubmissionThread;
     std::mutex frameQueueMutex;
+    // Notified when a frame is queued.
+    std::condition_variable_any frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
     QSet<uint32_t> pendingFrames;
@@ -396,12 +399,13 @@ void VideoStream::createStream(int monitor)
             connect(stream.nvencEncoder.get(),
                     &NvencEncoder::packetReady,
                     stream.nvencEncoder.get(),
-                    [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size) {
+                    [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent) {
                         VideoFrame frame;
                         frame.monitor = monitor;
                         frame.size = size;
                         frame.data = data;
                         frame.isKeyFrame = isKeyFrame;
+                        frame.sent = sent;
                         queueFrame(frame);
                     });
             connect(stream.nvencEncoder.get(), &NvencEncoder::failed, stream.nvencEncoder.get(), [this]() {
@@ -605,13 +609,12 @@ bool VideoStream::initialize()
             VideoFrame nextFrame;
             {
                 std::unique_lock lock(d->frameQueueMutex);
-                if (!d->frameQueue.isEmpty()) {
-                    nextFrame = d->frameQueue.takeFirst();
+                if (!d->frameQueueCondition.wait(lock, token, [this] {
+                        return !d->frameQueue.isEmpty();
+                    })) {
+                    break;
                 }
-            }
-            if (nextFrame.size.isEmpty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000) / d->requestedFrameRate.load());
-                continue;
+                nextFrame = d->frameQueue.takeFirst();
             }
             sendFrame(nextFrame);
         }
@@ -624,14 +627,25 @@ bool VideoStream::initialize()
 
 void VideoStream::close()
 {
-    for (const auto &stream : d->streams) {
-        if (stream->encodedStream) {
-            stream->encodedStream->stop();
-        }
-        if (stream->sourceStream) {
-            stream->sourceStream->setActive(false);
-        }
-    }
+    // PipeWire may only be used on the main thread, but the connection closes
+    // the stream from its own thread. Not waiting for the main thread there,
+    // as it may be waiting for the connection thread to finish.
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            for (const auto &stream : d->streams) {
+                if (stream->encodedStream) {
+                    stream->encodedStream->stop();
+                }
+                if (stream->sourceStream) {
+                    stream->sourceStream->setActive(false);
+                }
+                // Consumer GPUs only have a few NVENC sessions.
+                stream->nvencEncoder.reset();
+            }
+        },
+        Qt::AutoConnection);
+
     if (d->frameSubmissionThread.joinable()) {
         d->frameSubmissionThread.request_stop();
         d->frameSubmissionThread.join();
@@ -666,6 +680,11 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
     if (d->session->state() != RdpConnection::State::Streaming || !d->enabled) {
         return;
     }
+
+    // Woken up after the lock is released, at the end of the function.
+    auto notify = qScopeGuard([this]() {
+        d->frameQueueCondition.notify_one();
+    });
 
     std::lock_guard lock(d->frameQueueMutex);
     if (d->activeEncodingMode == EncodingMode::H264) {
@@ -713,6 +732,35 @@ void VideoStream::setEnabled(bool enabled)
 
     d->enabled = enabled;
     Q_EMIT enabledChanged();
+
+    // H.264 frames were dropped while disabled. Called from the connection
+    // thread, the streams belong to the main thread.
+    if (enabled) {
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                for (const auto &stream : d->streams) {
+                    if (stream->nvencEncoder) {
+                        stream->nvencEncoder->requestKeyFrame();
+                    }
+                }
+            },
+            Qt::QueuedConnection);
+    }
+}
+
+void VideoStream::requestKeyFrame(int monitor)
+{
+    // Called from the connection and frame submission threads, the streams
+    // belong to the main thread.
+    QMetaObject::invokeMethod(
+        this,
+        [this, monitor]() {
+            if (monitor < int(d->streams.size()) && d->streams.at(monitor)->nvencEncoder) {
+                d->streams.at(monitor)->nvencEncoder->requestKeyFrame();
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 void VideoStream::setStreamingEnabled(bool enabled)
@@ -934,6 +982,11 @@ void VideoStream::onPacketReceived(int monitor, const PipeWireEncodedStream::Pac
 
 void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
 {
+    // Frames that only move the cursor have no image.
+    if (!data.dataFrame && !data.dmabuf) {
+        return;
+    }
+
     VideoFrame frameData;
     frameData.monitor = monitor;
 
@@ -945,16 +998,13 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
 
     if (data.dataFrame) {
         frameData.image = data.dataFrame->toImage().convertToFormat(QImage::Format_RGB32);
-    } else if (data.dmabuf) {
+    } else {
         QImage image(frameData.size, QImage::Format_RGBA8888_Premultiplied);
         if (!d->dmaBufHandler.downloadFrame(image, data)) {
             qCWarning(KRDP) << "Failed to download DMA-BUF frame";
             return;
         }
         frameData.image = std::move(image);
-    } else {
-        qCWarning(KRDP) << "PipeWire frame did not contain usable image data";
-        return;
     }
 
     if (monitor >= int(d->streams.size())) {
@@ -1149,6 +1199,10 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 {
     auto peer = d->session->rdpPeer();
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
+        if (d->activeEncodingMode == EncodingMode::H264) {
+            // The next frames can't be decoded without this one.
+            requestKeyFrame(frame.monitor);
+        }
         return;
     }
 
@@ -1177,16 +1231,8 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     }
 
     if (newSurface && d->activeEncodingMode == EncodingMode::H264 && !frame.isKeyFrame) {
-        // The client can't decode this frame on a new surface. NVENC rarely
-        // sends key frames by itself, so ask for one.
-        QMetaObject::invokeMethod(
-            this,
-            [this, monitor = frame.monitor]() {
-                if (monitor < int(d->streams.size()) && d->streams.at(monitor)->nvencEncoder) {
-                    d->streams.at(monitor)->nvencEncoder->requestKeyFrame();
-                }
-            },
-            Qt::QueuedConnection);
+        // The client can't decode this frame on a new surface.
+        requestKeyFrame(frame.monitor);
     }
 
     if (d->activeEncodingMode == EncodingMode::H264) {
