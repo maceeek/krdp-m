@@ -399,7 +399,12 @@ void SessionController::onLocalUserDetected(const QString &reason)
 
     qInfo() << "Someone is at the computer (" << reason << "), returning the physical monitors";
 
-    if (m_lockOnTakeover) {
+    // Once the remote user has disconnected, there is nobody to protect from
+    // whoever is at the computer, the monitors are only being restored.
+    const bool remoteUserConnected = std::ranges::any_of(m_wrappers, [](const auto &wrapper) {
+        return !wrapper->connection.isNull();
+    });
+    if (m_lockOnTakeover && remoteUserConnected) {
         // Lock first, so whoever is at the computer does not get to see the
         // desktop of the remote user once the monitors come back.
         LocalPresenceMonitor::lockScreen();

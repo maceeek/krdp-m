@@ -68,9 +68,9 @@ saved layout when:
   restores its saved layout when it starts again and in `ExecStopPost` of its
   systemd unit (`krdpserver --restore-displays`).
 
-When the monitors are given back to someone at the computer, the screen is
-locked first (`LockOnLocalTakeover`), so they can not see the desktop of the
-remote user. Remote clients continue on their virtual monitors next to the
+When the monitors are given back to someone at the computer while a remote
+user is still connected, the screen is locked first (`LockOnLocalTakeover`),
+so they can not see the desktop of the remote user. Remote clients continue on their virtual monitors next to the
 monitors, or are disconnected if `DisconnectOnLocalTakeover` is set. The next
 remote session is exclusive again.
 
@@ -83,7 +83,7 @@ All keys are in the `[VirtualDisplay]` group of `~/.config/krdpserverrc`:
 | `VirtualDisplayMode` | `Exclusive` | `Disabled`, `Extend` or `Exclusive`, see above. |
 | `MaximumWidth`, `MaximumHeight` | `4096` | Largest virtual monitor that gets created, clients asking for more get this size. |
 | `DetectLocalInput` | `true` | Give the monitors back when local input is detected. |
-| `LockOnLocalTakeover` | `true` | Lock the screen before giving the monitors back. |
+| `LockOnLocalTakeover` | `true` | Lock the screen before giving the monitors back while a remote user is connected. |
 | `DisconnectOnLocalTakeover` | `false` | Disconnect remote clients when giving the monitors back. |
 
 ```bash
