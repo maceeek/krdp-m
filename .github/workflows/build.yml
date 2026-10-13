@@ -18,9 +18,23 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel git cmake ninja extra-cmake-modules plasma-wayland-protocols \
-            freerdp kcmutils kconfig kcoreaddons kcrash kdbusaddons kguiaddons ki18n \
+            kcmutils kconfig kcoreaddons kcrash kdbusaddons kguiaddons ki18n \
             kidletime kirigami kirigami-addons kpipewire kstatusnotifieritem libkscreen \
             libxkbcommon pam qt6-base qt6-declarative qt6-wayland qtkeychain-qt6 systemd-libs
+
+      # KRdp-M needs FreeRDP-M, which replaces the freerdp package of Arch Linux.
+      # Build it with its PKGBUILD, makepkg does not run as root.
+      - name: Build FreeRDP-M
+        run: |
+          useradd --create-home builder
+          install -d -o builder /tmp/freerdp-m
+          curl -fsSL -o /tmp/freerdp-m/PKGBUILD \
+            https://raw.githubusercontent.com/maceeek/freerdp-m/main/packaging/archlinux/PKGBUILD
+          chown builder /tmp/freerdp-m/PKGBUILD
+          cd /tmp/freerdp-m
+          bash -c 'source PKGBUILD && pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"'
+          su builder -c 'makepkg --nocheck --noconfirm'
+          pacman -U --noconfirm $(ls freerdp-m-git-*.pkg.tar.zst | grep -v -- -debug-)
 
       - uses: actions/checkout@v4
 
