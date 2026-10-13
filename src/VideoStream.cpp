@@ -564,7 +564,13 @@ void VideoStream::createStream(int monitor)
         }
 
         stream.sourceStream = std::make_unique<PipeWireSourceStream>();
-        stream.sourceStream->setAllowDmaBuf(true);
+        // Frames end up in memory either way, see onFrameReceived(). With
+        // DMA-BUF, KPipeWire offers every format with all modifiers of the GPU,
+        // on NVIDIA that does not fit its 4 KiB buffer for the formats. What
+        // does not fit is dropped, in an order that changes with every start,
+        // and when that is BGRx and BGRA, the only formats KWin offers,
+        // negotiating the stream fails with "no more input formats".
+        stream.sourceStream->setAllowDmaBuf(false);
         stream.sourceStream->setDamageEnabled(true);
         stream.sourceStream->setMaxFramerate({static_cast<quint32>(d->requestedFrameRate.load()), 1});
         // Handled right away, while PipeWire does not use the buffer of the
