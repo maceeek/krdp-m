@@ -82,9 +82,13 @@ public:
 
     QDBusObjectPath sessionPath;
 
+    struct InputCall {
+        std::function<QDBusPendingCall()> call;
+        bool pointerMotion = false;
+    };
     // Input notifications are issued one at a time, each only after the
     // previous one has been replied to. See dispatchNextInputCall().
-    QQueue<std::function<QDBusPendingCall()>> pendingInputCalls;
+    QQueue<InputCall> pendingInputCalls;
     bool inputCallInFlight = false;
 };
 
@@ -219,9 +223,11 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
         // Portal pointer motion is relative to the stream.
         auto logicalPosition = mapToLogical(me->position(), QRectF(QPointF(0, 0), logicalSize()));
         const auto node = nodeId();
-        enqueueInputCall([this, node, logicalPosition]() {
-            return d->remoteInterface->NotifyPointerMotionAbsolute(d->sessionPath, QVariantMap{}, node, logicalPosition.x(), logicalPosition.y());
-        });
+        enqueueInputCall(
+            [this, node, logicalPosition]() {
+                return d->remoteInterface->NotifyPointerMotionAbsolute(d->sessionPath, QVariantMap{}, node, logicalPosition.x(), logicalPosition.y());
+            },
+            true);
         break;
     }
     case QEvent::Wheel: {
@@ -259,14 +265,22 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
     }
 }
 
-void PortalSession::enqueueInputCall(std::function<QDBusPendingCall()> &&call)
+void PortalSession::enqueueInputCall(std::function<QDBusPendingCall()> &&call, bool pointerMotion)
 {
+    // Clients can send motion faster than the portal replies. Rather than
+    // having the pointer lag behind going through every position, motion that
+    // is still waiting is replaced by the next one, as both are absolute.
+    if (pointerMotion && !d->pendingInputCalls.isEmpty() && d->pendingInputCalls.last().pointerMotion) {
+        d->pendingInputCalls.last().call = std::move(call);
+        return;
+    }
+
     if (d->pendingInputCalls.size() >= maxPendingInputCalls) {
         qCWarning(KRDP) << "Portal input queue overflowed; dropping the oldest event";
         d->pendingInputCalls.dequeue();
     }
 
-    d->pendingInputCalls.enqueue(std::move(call));
+    d->pendingInputCalls.enqueue({std::move(call), pointerMotion});
     dispatchNextInputCall();
 }
 
@@ -290,7 +304,7 @@ void PortalSession::dispatchNextInputCall()
     // connection. One call in flight at a time therefore makes the ordering
     // exact rather than merely likely.
     while (!d->inputCallInFlight && !d->pendingInputCalls.isEmpty()) {
-        auto call = d->pendingInputCalls.dequeue();
+        auto call = d->pendingInputCalls.dequeue().call;
         d->inputCallInFlight = true;
 
         auto watcher = new QDBusPendingCallWatcher(call(), this);

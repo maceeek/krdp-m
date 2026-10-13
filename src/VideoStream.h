@@ -142,6 +142,11 @@ private:
     bool createSurface(int monitor);
     void performReset(const QRect &desktop, int monitor);
     bool hasInFlightCapacity() const;
+    void wakeFrameSubmission();
+    /**
+     * Forget about frame \p frameId, which was not sent after all.
+     */
+    void unregisterFrame(uint32_t frameId);
     void sendFrame(const VideoFrame &frame);
     void sendFrameH264(const VideoFrame &frame, const Surface &surface);
     void sendFrameProgressive(const VideoFrame &frame, const Surface &surface);
