@@ -50,6 +50,25 @@ set_package_properties(KF6Screen PROPERTIES DESCRIPTION "Output management" PURP
 find_package(FreeRDP 3.1 REQUIRED)
 find_package(WinPR 3.1 REQUIRED)
 find_package(FreeRDP-Server 3.1 REQUIRED)
+# KRdp-M is built against FreeRDP-M (https://github.com/maceeek/freerdp-m) with
+# WITH_GFX_AV1, for AV1 encoding on the GPU.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+set(CMAKE_REQUIRED_LIBRARIES freerdp winpr)
+# Checked again on every run, the FreeRDP found may have changed.
+unset(FREERDP_M_FOUND CACHE)
+check_cxx_source_compiles("
+#include <freerdp/codec/av1.h>
+#if !defined(FREERDP_AV1_HARDWARE_SUPPORT)
+#error FreeRDP without AV1 encoding on the GPU
+#endif
+int main() { freerdp_av1_context_free(freerdp_av1_context_new(TRUE)); return 0; }
+" FREERDP_M_FOUND)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if (NOT FREERDP_M_FOUND)
+    message(FATAL_ERROR "KRdp-M needs FreeRDP-M built with -DWITH_GFX_AV1=ON, see https://github.com/maceeek/freerdp-m")
+endif()
 find_package(KPipeWire 5.27.80 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFmpeg REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)

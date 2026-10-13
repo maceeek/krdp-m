@@ -6,12 +6,7 @@
 
 #include <memory>
 
-#include <QByteArray>
-#include <QImage>
-#include <QObject>
-#include <QSize>
-
-#include "krdp_export.h"
+#include "FrameEncoder.h"
 
 namespace KRdp
 {
@@ -21,14 +16,11 @@ namespace KRdp
  *
  * KPipeWire only knows VAAPI for hardware encoding, which the NVIDIA driver
  * does not provide, so on NVIDIA GPUs KRdp would encode in software. This
- * encodes raw frames from a PipeWireSourceStream instead.
- *
- * Frames are encoded on a thread of their own. When frames come in faster
- * than they can be encoded or sent only the latest one is kept. Every frame is
+ * encodes raw frames from a PipeWireSourceStream instead. Every frame is
  * encoded as a whole into the same Baseline profile, full range BT.601
  * stream KPipeWire produces for KRdp.
  */
-class KRDP_EXPORT NvencEncoder : public QObject
+class KRDP_EXPORT NvencEncoder : public FrameEncoder
 {
     Q_OBJECT
 
@@ -48,35 +40,9 @@ public:
      */
     static bool isAvailable();
 
-    /**
-     * Set the quality from 0 to 100. When it changes, the next frame is a
-     * key frame.
-     */
-    void setQuality(quint8 quality);
-
-    /**
-     * Encode \p image, replacing a frame that is still waiting to be encoded.
-     */
-    void encode(const QImage &image);
-
-    /**
-     * Encode the next frame as a key frame. Without a new frame the last
-     * frame is encoded again.
-     */
-    void requestKeyFrame();
-
-    /**
-     * A frame of \p size was encoded. Emitted from the encoding thread.
-     *
-     * Keep \p sent until the packet was sent to the client or dropped. Until
-     * then no other frame is encoded, so frames don't queue up.
-     */
-    Q_SIGNAL void packetReady(const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent);
-    /**
-     * The encoder could not be set up or stopped working, nothing will be
-     * encoded anymore. Emitted from the encoding thread.
-     */
-    Q_SIGNAL void failed();
+protected:
+    bool encodeImage(const QImage &image, bool keyFrame) override;
+    void close() override;
 
 private:
     class Private;

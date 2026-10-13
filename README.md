@@ -2,10 +2,12 @@
 
 KRdp-M is a fork of [KRdp](https://invent.kde.org/plasma/krdp), the RDP server
 of KDE Plasma, based on its Plasma 6.7 branch. It adds virtual displays that
-follow the RDP client, see [Virtual displays](#virtual-displays) below, and
-[hardware encoding on NVIDIA GPUs](#hardware-encoding-on-nvidia-gpus).
+follow the RDP client, see [Virtual displays](#virtual-displays) below,
+[hardware encoding on NVIDIA GPUs](#hardware-encoding-on-nvidia-gpus) and
+[AV1 encoding](#av1-encoding) for clients using FreeRDP-M.
 
-It builds against the libraries of Plasma 6.7 and replaces the `krdp` package,
+It builds against the libraries of Plasma 6.7 and
+[FreeRDP-M](https://github.com/maceeek/freerdp-m), and replaces the `krdp` package,
 for Arch Linux and CachyOS see [Installing on Arch Linux and CachyOS](#installing-on-arch-linux-and-cachyos).
 
 ## Virtual displays
@@ -122,6 +124,31 @@ software on NVIDIA GPUs. KRdp-M encodes with NVENC instead, through FFmpeg:
 The log of krdpserver says `Encoding monitor 0 with NVENC` when NVENC is used,
 see [Debugging](#debugging).
 
+## AV1 encoding
+
+KRdp-M is built against [FreeRDP-M](https://github.com/maceeek/freerdp-m), a
+fork of FreeRDP that encodes and decodes AV1 with the GPU: NVENC/NVDEC on
+NVIDIA GPUs, VAAPI on AMD (e.g. Ryzen AI 300 with Radeon 860M) and Intel GPUs.
+AV1 needs less bandwidth than H.264 for the same quality.
+
+AV1 is an extension of FreeRDP to the RDP graphics pipeline
+(`RDPGFX_CAPVERSION_FRDP_1`), so it is only used when both sides support it:
+
+- The client uses FreeRDP-M, e.g. [KRDC-M](https://github.com/maceeek/krdc-m)
+  or `xfreerdp3`/`sdl-freerdp3` of FreeRDP-M, with AV1 enabled (the default).
+- A GPU of the server encodes AV1. Without one, AV1 is not offered: encoding
+  it in software is too slow for a desktop.
+
+Every other client, e.g. the Windows Remote Desktop client, Remmina or FreeRDP
+itself, gets H.264 exactly as before. If AV1 stops working during a session,
+the session continues with H.264 (or the progressive codec, for clients
+without H.264).
+
+Frames are encoded as a whole in 4:2:0, with the quality set in System
+Settings. The log of krdpserver says `Encoding monitor 0 with AV1` when AV1 is
+used. Set `KRDP_DISABLE_AV1=1` in the environment of krdpserver to always use
+H.264, like `KRDP_DISABLE_NVENC` above.
+
 ## Debugging
 
 ```bash
@@ -131,6 +158,9 @@ journalctl --user -u app-org.kde.krdpserver.service -f
 ```
 
 ## Installing on Arch Linux and CachyOS
+
+Install [FreeRDP-M](https://github.com/maceeek/freerdp-m#installing-on-arch-linux-and-cachyos)
+first, it replaces the `freerdp` package. Then:
 
 ```bash
 git clone https://github.com/maceeek/krdp-m.git

@@ -25,6 +25,7 @@ target_sources(KRdp PRIVATE
     InputHandler.h
     PeerContext.cpp
     PeerContext_p.h
+    PixelFormat_p.h
     PortalSession.cpp
     PortalSession.h
     VideoStream.cpp
@@ -37,8 +38,14 @@ target_sources(KRdp PRIVATE
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
+    FrameEncoder.cpp
+    FrameEncoder.h
     NvencEncoder.cpp
     NvencEncoder.h
+    Av1Encoder.cpp
+    Av1Encoder.h
+    GfxCapabilities.cpp
+    GfxCapabilities.h
 )
 
 ecm_qt_declare_logging_category(KRdp

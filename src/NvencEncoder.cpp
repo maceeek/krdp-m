@@ -5,12 +5,8 @@
 #include "NvencEncoder.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
-#include <optional>
 #include <thread>
 
 #include <QElapsedTimer>
@@ -31,10 +27,6 @@ namespace KRdp
 // for one, so they are rare and big frames don't cause regular stutters.
 constexpr int GopSize = 600;
 constexpr int ConversionThreads = 4;
-// Packets that were encoded but not sent yet. Encoding more than the client
-// takes would only queue them up and add latency, as H.264 frames can't be
-// dropped. Instead, newer frames replace older ones before encoding.
-constexpr int MaximumUnsentPackets = 1;
 
 static QString errorString(int error)
 {
@@ -72,27 +64,12 @@ static SwsContext *createColorConversion(const QSize &size, AVPixelFormat format
 class KRDP_NO_EXPORT NvencEncoder::Private
 {
 public:
-    void run(std::stop_token token, NvencEncoder *q);
-    bool encodeImage(const QImage &image, bool keyFrame, NvencEncoder *q);
+    bool encodeImage(const QImage &image, bool keyFrame, quint8 quality, NvencEncoder *q);
     bool open(const QSize &size, quint8 quality);
     void close();
     AVDictionary *codecOptions(quint8 quality) const;
 
     QByteArray codecName;
-    std::atomic<quint8> quality = 75;
-
-    /**
-     * Shared with the tokens of packets, which may outlive the encoder.
-     */
-    struct Input {
-        std::mutex mutex;
-        std::condition_variable_any condition;
-        // Guarded by mutex.
-        std::optional<QImage> pending;
-        bool keyFrameRequested = false;
-        int unsentPackets = 0;
-    };
-    const std::shared_ptr<Input> input = std::make_shared<Input>();
 
     // Only used on the encoding thread.
     AVCodecContext *context = nullptr;
@@ -102,27 +79,20 @@ public:
     AVPixelFormat swsFormat = AV_PIX_FMT_NONE;
     QSize size;
     quint8 contextQuality = 0;
-    QImage lastImage;
     QElapsedTimer clock;
     int64_t lastPts = -1;
-
-    std::jthread thread;
 };
 
 NvencEncoder::NvencEncoder(const QByteArray &codecName)
-    : QObject(nullptr)
-    , d(std::make_unique<Private>())
+    : d(std::make_unique<Private>())
 {
     d->codecName = codecName;
-    d->thread = std::jthread([this](std::stop_token token) {
-        d->run(token, this);
-    });
+    start();
 }
 
 NvencEncoder::~NvencEncoder()
 {
-    d->thread.request_stop();
-    d->thread.join();
+    stop();
     d->close();
 }
 
@@ -142,66 +112,17 @@ bool NvencEncoder::isAvailable()
     return available;
 }
 
-void NvencEncoder::setQuality(quint8 quality)
+void NvencEncoder::close()
 {
-    d->quality = quality;
+    d->close();
 }
 
-void NvencEncoder::encode(const QImage &image)
+bool NvencEncoder::encodeImage(const QImage &image, bool keyFrame)
 {
-    {
-        std::lock_guard lock(d->input->mutex);
-        d->input->pending = image;
-    }
-    d->input->condition.notify_one();
+    return d->encodeImage(image, keyFrame, quality(), this);
 }
 
-void NvencEncoder::requestKeyFrame()
-{
-    {
-        std::lock_guard lock(d->input->mutex);
-        d->input->keyFrameRequested = true;
-    }
-    d->input->condition.notify_one();
-}
-
-void NvencEncoder::Private::run(std::stop_token token, NvencEncoder *q)
-{
-    while (!token.stop_requested()) {
-        QImage image;
-        bool keyFrame = false;
-        {
-            std::unique_lock lock(input->mutex);
-            if (!input->condition.wait(lock, token, [this] {
-                    return (input->pending.has_value() || input->keyFrameRequested) && input->unsentPackets < MaximumUnsentPackets;
-                })) {
-                return;
-            }
-            if (input->pending) {
-                image = std::move(*input->pending);
-                input->pending.reset();
-            } else {
-                image = lastImage;
-            }
-            keyFrame = std::exchange(input->keyFrameRequested, false);
-        }
-
-        // A key frame requested before the first frame, the first frame
-        // will be one.
-        if (image.isNull()) {
-            continue;
-        }
-
-        lastImage = image;
-        if (!encodeImage(image, keyFrame, q)) {
-            close();
-            Q_EMIT q->failed();
-            return;
-        }
-    }
-}
-
-bool NvencEncoder::Private::encodeImage(const QImage &sourceImage, bool keyFrame, NvencEncoder *q)
+bool NvencEncoder::Private::encodeImage(const QImage &sourceImage, bool keyFrame, quint8 requestedQuality, NvencEncoder *q)
 {
     QImage image = sourceImage;
     AVPixelFormat format = AV_PIX_FMT_NONE;
@@ -233,7 +154,6 @@ bool NvencEncoder::Private::encodeImage(const QImage &sourceImage, bool keyFrame
         image = padded;
     }
 
-    const quint8 requestedQuality = quality;
     if (!context || sourceImage.size() != size || requestedQuality != contextQuality) {
         close();
         if (!open(sourceImage.size(), requestedQuality)) {
@@ -288,19 +208,7 @@ bool NvencEncoder::Private::encodeImage(const QImage &sourceImage, bool keyFrame
             return false;
         }
 
-        {
-            std::lock_guard lock(input->mutex);
-            ++input->unsentPackets;
-        }
-        // Released once the packet was sent or dropped.
-        const auto sent = std::shared_ptr<void>(nullptr, [input = input](void *) {
-            {
-                std::lock_guard lock(input->mutex);
-                --input->unsentPackets;
-            }
-            input->condition.notify_one();
-        });
-        Q_EMIT q->packetReady(QByteArray(reinterpret_cast<const char *>(packet->data), packet->size), packet->flags & AV_PKT_FLAG_KEY, size, sent);
+        q->emitPacket(QByteArray(reinterpret_cast<const char *>(packet->data), packet->size), packet->flags & AV_PKT_FLAG_KEY, size);
         av_packet_unref(packet);
     }
 
