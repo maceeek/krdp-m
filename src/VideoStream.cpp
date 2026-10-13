@@ -31,6 +31,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
 #include <freerdp/update.h>
+#include <kpipewire_version.h>
 #include <qassert.h>
 
 #include "NetworkDetection.h"
@@ -50,6 +51,12 @@ constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seco
 constexpr qsizetype MaximumInFlightFrames = 2;
 // The smallest change of the requested frame rate that is applied.
 constexpr int MinimumFrameRateChange = 2;
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+// The number of frames of a monitor waiting to be sent above which KPipeWire
+// drops frames before encoding them, and below which it encodes them again.
+constexpr qsizetype HighQueueCount = 3;
+constexpr qsizetype LowQueueCount = 1;
+#endif
 constexpr uint32_t ProgressiveCodecContextId = 1;
 struct RdpCapsInformation {
     uint32_t version;
@@ -743,6 +750,17 @@ bool VideoStream::initialize()
                 nextFrame = d->frameQueue.takeFirst();
             }
             sendFrame(nextFrame);
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+            // Frames encoded by KPipeWire, its encoder may wait for them to be sent.
+            if (!nextFrame.data.isEmpty() && !nextFrame.sent) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, monitor = nextFrame.monitor]() {
+                        updateBackpressure(monitor);
+                    },
+                    Qt::QueuedConnection);
+            }
+#endif
         }
     });
 
@@ -1128,6 +1146,43 @@ void VideoStream::onPacketReceived(int monitor, const PipeWireEncodedStream::Pac
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
     queueFrame(frameData);
+    updateBackpressure(monitor);
+}
+
+void VideoStream::updateBackpressure(int monitor)
+{
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+    // Encoded H.264 frames can't be dropped anymore. When the client takes
+    // them slower than KPipeWire encodes them they queue up, adding latency
+    // until the next key frame. Instead KPipeWire drops frames before encoding
+    // them while many are queued, and encodes the latest one once few are left.
+    if (monitor < 0 || monitor >= int(d->streams.size())) {
+        return;
+    }
+    const auto &encodedStream = d->streams.at(monitor)->encodedStream;
+    if (!encodedStream) {
+        return;
+    }
+
+    qsizetype queued = 0;
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        queued = std::count_if(d->frameQueue.cbegin(), d->frameQueue.cend(), [monitor](const VideoFrame &frame) {
+            return frame.monitor == monitor;
+        });
+    }
+
+    const bool paused = encodedStream->encoderPaused();
+    if (!paused && queued > HighQueueCount) {
+        qCDebug(KRDP) << "Pausing the encoder of monitor" << monitor << "with" << queued << "frames queued";
+        encodedStream->setEncoderPaused(true);
+    } else if (paused && queued < LowQueueCount) {
+        qCDebug(KRDP) << "Resuming the encoder of monitor" << monitor;
+        encodedStream->setEncoderPaused(false);
+    }
+#else
+    Q_UNUSED(monitor);
+#endif
 }
 
 void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
