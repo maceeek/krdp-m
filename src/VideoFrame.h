@@ -32,9 +32,13 @@ struct VideoFrame {
      */
     QSize size;
     /**
-     * h264 compressed data in YUV420 color space.
+     * h264 compressed data in YUV420 color space, or AV1 if isAv1 is set.
      */
     QByteArray data;
+    /**
+     * Whether data is AV1 rather than H.264.
+     */
+    bool isAv1 = false;
     /**
      * Raw frame data for classic raster updates.
      */

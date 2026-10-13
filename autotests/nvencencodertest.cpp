@@ -236,7 +236,8 @@ private Q_SLOTS:
         QSignalSpy packets(&encoder, &NvencEncoder::packetReady);
 
         encoder.encode(solidImage(QSize(64, 48), Qt::red));
-        QVERIFY(packets.wait(5000));
+        // The packet may arrive before waiting would start.
+        QTRY_COMPARE_WITH_TIMEOUT(packets.count(), 1, 5000);
 
         // Nothing is encoded while the packet was not sent.
         encoder.encode(solidImage(QSize(64, 48), Qt::green));

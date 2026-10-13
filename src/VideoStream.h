@@ -48,6 +48,10 @@ public:
     enum class EncodingMode {
         H264,
         Progressive,
+        /**
+         * Only for clients using FreeRDP-M, see Av1Encoder.
+         */
+        AV1,
     };
 
     explicit VideoStream(RdpConnection *session);
@@ -137,8 +141,8 @@ private:
     void setStreamSize(int monitor, const QSize &size);
     void restartEncoder(int monitor);
     /**
-     * Have the NVENC encoder of \p monitor send a key frame. Without NVENC,
-     * KPipeWire sends key frames regularly by itself.
+     * Have the NVENC or AV1 encoder of \p monitor send a key frame. Without
+     * them, KPipeWire sends key frames regularly by itself.
      */
     void requestKeyFrame(int monitor);
     void refreshMonitor(int monitor);
@@ -153,7 +157,10 @@ private:
      */
     void unregisterFrame(uint32_t frameId);
     void sendFrame(const VideoFrame &frame);
-    void sendFrameH264(const VideoFrame &frame, const Surface &surface);
+    /**
+     * Send an H.264 (AVC420) or AV1 frame.
+     */
+    void sendFrameVideo(const VideoFrame &frame, const Surface &surface, uint16_t codecId);
     void sendFrameProgressive(const VideoFrame &frame, const Surface &surface);
 
     void updateRequestedFrameRate();

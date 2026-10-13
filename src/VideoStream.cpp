@@ -34,9 +34,12 @@
 #include <kpipewire_version.h>
 #include <qassert.h>
 
+#include "Av1Encoder.h"
+#include "GfxCapabilities.h"
 #include "NetworkDetection.h"
 #include "NvencEncoder.h"
 #include "PeerContext_p.h"
+#include "PixelFormat_p.h"
 #include "RdpConnection.h"
 
 #include "krdp_logging.h"
@@ -58,41 +61,6 @@ constexpr qsizetype HighQueueCount = 3;
 constexpr qsizetype LowQueueCount = 1;
 #endif
 constexpr uint32_t ProgressiveCodecContextId = 1;
-struct RdpCapsInformation {
-    uint32_t version;
-    RDPGFX_CAPSET capSet;
-    bool avcSupported : 1 = false;
-    bool yuv420Supported : 1 = false;
-};
-
-const char *capVersionToString(uint32_t version)
-{
-    switch (version) {
-    case RDPGFX_CAPVERSION_107:
-        return "RDPGFX_CAPVERSION_107";
-    case RDPGFX_CAPVERSION_106:
-        return "RDPGFX_CAPVERSION_106";
-    case RDPGFX_CAPVERSION_105:
-        return "RDPGFX_CAPVERSION_105";
-    case RDPGFX_CAPVERSION_104:
-        return "RDPGFX_CAPVERSION_104";
-    case RDPGFX_CAPVERSION_103:
-        return "RDPGFX_CAPVERSION_103";
-    case RDPGFX_CAPVERSION_102:
-        return "RDPGFX_CAPVERSION_102";
-    case RDPGFX_CAPVERSION_101:
-        return "RDPGFX_CAPVERSION_101";
-    case RDPGFX_CAPVERSION_10:
-        return "RDPGFX_CAPVERSION_10";
-    case RDPGFX_CAPVERSION_81:
-        return "RDPGFX_CAPVERSION_81";
-    case RDPGFX_CAPVERSION_8:
-        return "RDPGFX_CAPVERSION_8";
-    default:
-        return "UNKNOWN_VERSION";
-    }
-}
-
 BOOL gfxChannelIdAssigned(RdpgfxServerContext *context, uint32_t channelId)
 {
     auto stream = reinterpret_cast<VideoStream *>(context->custom);
@@ -234,8 +202,8 @@ public:
 
         std::unique_ptr<PipeWireEncodedStream> encodedStream;
         std::unique_ptr<PipeWireSourceStream> sourceStream;
-        // Encodes the frames of sourceStream for H.264 on NVIDIA GPUs.
-        std::unique_ptr<NvencEncoder> nvencEncoder;
+        // Encodes the frames of sourceStream: AV1, or H.264 on NVIDIA GPUs.
+        std::unique_ptr<FrameEncoder> encoder;
         quint32 nodeId = 0;
         int pipeWireFd = -1;
         QSize size;
@@ -285,6 +253,10 @@ public:
     DmaBufHandler dmaBufHandler;
     // NVENC did not work, KPipeWire encodes instead.
     bool nvencFailed = false;
+    // AV1 did not work, fallbackEncodingMode is used instead. Read on the
+    // connection thread.
+    std::atomic_bool av1Failed = false;
+    EncodingMode fallbackEncodingMode = EncodingMode::Progressive;
 
     RdpGfxContextPtr gfxContext = RdpGfxContextPtr(nullptr, rdpgfx_server_context_free);
     ProgressiveContextPtr progressive = ProgressiveContextPtr(nullptr, progressive_context_free);
@@ -335,10 +307,20 @@ static QString encodingModeName(VideoStream::EncodingMode mode)
     switch (mode) {
     case VideoStream::EncodingMode::H264:
         return QStringLiteral("h264");
+    case VideoStream::EncodingMode::AV1:
+        return QStringLiteral("av1");
     case VideoStream::EncodingMode::Progressive:
         return QStringLiteral("progressive");
     }
     Q_UNREACHABLE();
+}
+
+/**
+ * Whether \p mode sends a video stream, which needs key frames.
+ */
+static bool isVideo(std::optional<VideoStream::EncodingMode> mode)
+{
+    return mode == VideoStream::EncodingMode::H264 || mode == VideoStream::EncodingMode::AV1;
 }
 
 bool VideoStream::h264Disabled()
@@ -377,28 +359,6 @@ static QImage copyImage(const PipeWireFrameData &data, ImagePool &pool)
         return image;
     }
     return data.toImage().convertToFormat(QImage::Format_RGB32);
-}
-
-/**
- * The FreeRDP pixel format with the memory layout of \p format, if there is one.
- */
-static std::optional<UINT32> toPixelFormat(QImage::Format format)
-{
-    switch (format) {
-    case QImage::Format_RGB32:
-    case QImage::Format_ARGB32:
-    case QImage::Format_ARGB32_Premultiplied:
-        if (Q_BYTE_ORDER == Q_LITTLE_ENDIAN) {
-            return PIXEL_FORMAT_BGRX32;
-        }
-        return PIXEL_FORMAT_XRGB32;
-    case QImage::Format_RGBX8888:
-    case QImage::Format_RGBA8888:
-    case QImage::Format_RGBA8888_Premultiplied:
-        return PIXEL_FORMAT_RGBX32;
-    default:
-        return std::nullopt;
-    }
 }
 
 static std::optional<REGION16> toRegion16(const QRegion &region, const QRect &frameRect)
@@ -457,8 +417,8 @@ void VideoStream::setActiveEncodingMode(EncodingMode mode)
         createStream(monitor);
     }
 
-    // NVENC encoders queue their frames themselves, until they are destroyed
-    // above.
+    // NVENC and AV1 encoders queue their frames themselves, until they are
+    // destroyed above.
     std::lock_guard lock(d->frameQueueMutex);
     d->frameQueue.clear();
 }
@@ -475,13 +435,14 @@ void VideoStream::createStream(int monitor)
         stream.sourceStream->setActive(false);
         stream.sourceStream.reset();
     }
-    stream.nvencEncoder.reset();
+    stream.encoder.reset();
     stream.encoderRestartPending = false;
 
     if (!d->activeEncodingMode) {
         return;
     }
 
+    const bool useAv1 = *d->activeEncodingMode == EncodingMode::AV1;
     const bool useNvenc = *d->activeEncodingMode == EncodingMode::H264 && NvencEncoder::isAvailable() && !d->nvencFailed;
 
     if (*d->activeEncodingMode == EncodingMode::H264 && !useNvenc) {
@@ -526,35 +487,52 @@ void VideoStream::createStream(int monitor)
             stream.encodedStream->start();
         }
     } else {
-        if (useNvenc) {
+        if (useAv1) {
+            qCInfo(KRDP) << "Encoding monitor" << monitor << "with AV1";
+            stream.encoder = std::make_unique<Av1Encoder>();
+        } else if (useNvenc) {
             qCInfo(KRDP) << "Encoding monitor" << monitor << "with NVENC";
-            stream.nvencEncoder = std::make_unique<NvencEncoder>();
-            stream.nvencEncoder->setQuality(d->quality);
+            stream.encoder = std::make_unique<NvencEncoder>();
+        }
+        if (stream.encoder) {
+            stream.encoder->setQuality(d->quality);
             // Queued for sending right on the encoding thread, rather than
             // waiting for the main thread, which may be busy downloading the
             // next frame. The encoder stops its thread when it is destroyed,
             // so no packets of an encoder that was replaced arrive afterwards.
             connect(
-                stream.nvencEncoder.get(),
-                &NvencEncoder::packetReady,
-                stream.nvencEncoder.get(),
-                [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent) {
+                stream.encoder.get(),
+                &FrameEncoder::packetReady,
+                stream.encoder.get(),
+                [this, monitor, useAv1](const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent) {
                     VideoFrame frame;
                     frame.monitor = monitor;
                     frame.size = size;
                     frame.data = data;
+                    frame.isAv1 = useAv1;
                     frame.isKeyFrame = isKeyFrame;
                     frame.sent = sent;
                     queueFrame(frame);
                 },
                 Qt::DirectConnection);
-            connect(stream.nvencEncoder.get(), &NvencEncoder::failed, stream.nvencEncoder.get(), [this]() {
-                qCWarning(KRDP) << "NVENC does not work, falling back to KPipeWire for H.264 encoding";
-                d->nvencFailed = true;
+            connect(stream.encoder.get(), &FrameEncoder::failed, stream.encoder.get(), [this, useAv1]() {
+                if (useAv1) {
+                    qCWarning(KRDP) << "AV1 does not work, falling back to" << encodingModeName(d->fallbackEncodingMode);
+                    d->av1Failed = true;
+                } else {
+                    qCWarning(KRDP) << "NVENC does not work, falling back to KPipeWire for H.264 encoding";
+                    d->nvencFailed = true;
+                }
                 // Not from within a signal of the encoder that gets destroyed.
                 QMetaObject::invokeMethod(
                     this,
-                    [this]() {
+                    [this, useAv1]() {
+                        if (useAv1) {
+                            // The surfaces of the other codec are created anew.
+                            setActiveEncodingMode(d->fallbackEncodingMode);
+                            reset();
+                            return;
+                        }
                         for (std::size_t monitor = 0; monitor < d->streams.size(); ++monitor) {
                             createStream(monitor);
                         }
@@ -631,11 +609,11 @@ VideoStream::~VideoStream()
 
 void VideoStream::restartEncoder(int monitor)
 {
-    if (monitor < 0 || monitor >= int(d->streams.size()) || d->activeEncodingMode != EncodingMode::H264) {
+    if (monitor < 0 || monitor >= int(d->streams.size()) || !isVideo(d->activeEncodingMode)) {
         return;
     }
 
-    if (const auto &encoder = d->streams.at(monitor)->nvencEncoder) {
+    if (const auto &encoder = d->streams.at(monitor)->encoder) {
         encoder->requestKeyFrame();
         return;
     }
@@ -652,7 +630,7 @@ void VideoStream::refreshMonitor(int monitor)
 
     qCDebug(KRDP) << "Repainting monitor" << monitor << "after its surface was recreated";
 
-    if (d->activeEncodingMode == EncodingMode::H264) {
+    if (isVideo(d->activeEncodingMode)) {
         // A new encoder starts with a key frame.
         restartEncoder(monitor);
         return;
@@ -791,7 +769,7 @@ void VideoStream::close()
                     stream->sourceStream->setActive(false);
                 }
                 // Consumer GPUs only have a few NVENC sessions.
-                stream->nvencEncoder.reset();
+                stream->encoder.reset();
             }
         },
         Qt::AutoConnection);
@@ -838,7 +816,7 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
     });
 
     std::lock_guard lock(d->frameQueueMutex);
-    if (d->activeEncodingMode == EncodingMode::H264) {
+    if (isVideo(d->activeEncodingMode)) {
         // Frames before a key frame of the same monitor are not needed anymore.
         if (frame.isKeyFrame) {
             d->frameQueue.removeIf([&frame](const VideoFrame &queued) {
@@ -891,8 +869,8 @@ void VideoStream::setEnabled(bool enabled)
             this,
             [this]() {
                 for (const auto &stream : d->streams) {
-                    if (stream->nvencEncoder) {
-                        stream->nvencEncoder->requestKeyFrame();
+                    if (stream->encoder) {
+                        stream->encoder->requestKeyFrame();
                     }
                 }
             },
@@ -907,8 +885,8 @@ void VideoStream::requestKeyFrame(int monitor)
     QMetaObject::invokeMethod(
         this,
         [this, monitor]() {
-            if (monitor < int(d->streams.size()) && d->streams.at(monitor)->nvencEncoder) {
-                d->streams.at(monitor)->nvencEncoder->requestKeyFrame();
+            if (monitor < int(d->streams.size()) && d->streams.at(monitor)->encoder) {
+                d->streams.at(monitor)->encoder->requestKeyFrame();
             }
         },
         Qt::QueuedConnection);
@@ -942,8 +920,8 @@ void VideoStream::setVideoQuality(quint8 quality)
         if (stream->encodedStream) {
             stream->encodedStream->setQuality(quality);
         }
-        if (stream->nvencEncoder) {
-            stream->nvencEncoder->setQuality(quality);
+        if (stream->encoder) {
+            stream->encoder->setQuality(quality);
         }
     }
 }
@@ -1010,65 +988,27 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         d->pendingFrames.clear();
     }
 
-    auto capsSets = capsAdvertise->capsSets;
-    auto count = capsAdvertise->capsSetCount;
-
-    std::vector<RdpCapsInformation> capsInformation;
-    capsInformation.reserve(count);
-
-    qCDebug(KRDP) << "Received caps:";
-    for (int i = 0; i < count; ++i) {
-        auto set = capsSets[i];
-
-        RdpCapsInformation caps;
-        caps.version = set.version;
-        caps.capSet = set;
-
-        switch (caps.version) {
-        case RDPGFX_CAPVERSION_107:
-        case RDPGFX_CAPVERSION_106:
-        case RDPGFX_CAPVERSION_105:
-        case RDPGFX_CAPVERSION_104:
-            caps.yuv420Supported = true;
-            Q_FALLTHROUGH();
-        case RDPGFX_CAPVERSION_103:
-        case RDPGFX_CAPVERSION_102:
-        case RDPGFX_CAPVERSION_101:
-        case RDPGFX_CAPVERSION_10:
-            if (!(set.flags & RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
-                caps.avcSupported = true;
-            }
-            break;
-        case RDPGFX_CAPVERSION_81:
-            if (set.flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) {
-                caps.avcSupported = true;
-                caps.yuv420Supported = true;
-            }
-            break;
-        case RDPGFX_CAPVERSION_8:
-            break;
-        }
-
-        qCDebug(KRDP) << " " << capVersionToString(caps.version) << "flags:" << Qt::hex << set.flags << Qt::dec << "AVC:" << caps.avcSupported
-                      << "YUV420:" << caps.yuv420Supported;
-
-        capsInformation.push_back(caps);
-    }
-
-    const bool supportsProgresive = !capsInformation.empty();
-
-    const bool supportsH264 = std::any_of(capsInformation.begin(), capsInformation.end(), [](const RdpCapsInformation &caps) {
-        return caps.avcSupported && caps.yuv420Supported;
-    });
-
-    EncodingMode negotiatedMode = EncodingMode::Progressive;
-    if (!h264Disabled() && supportsH264) {
-        negotiatedMode = EncodingMode::H264;
-    } else if (!supportsProgresive) {
+    const bool av1 = !d->av1Failed && Av1Encoder::isAvailable();
+    const auto capabilities = chooseGfxCapabilities(capsAdvertise->capsSets, capsAdvertise->capsSetCount, !h264Disabled(), av1);
+    if (!capabilities) {
         qCWarning(KRDP) << "Client advertised no usable graphics capability sets";
         d->session->close(RdpConnection::CloseReason::VideoInitFailed);
         return CHANNEL_RC_INITIALIZATION_ERROR;
     }
+
+    EncodingMode negotiatedMode = EncodingMode::Progressive;
+    switch (capabilities->codec) {
+    case GfxCodec::H264:
+        negotiatedMode = EncodingMode::H264;
+        break;
+    case GfxCodec::Av1:
+        negotiatedMode = EncodingMode::AV1;
+        break;
+    case GfxCodec::Progressive:
+        break;
+    }
+    // Only set here, it is read on the main thread once the encoder failed.
+    d->fallbackEncodingMode = capabilities->h264Supported ? EncodingMode::H264 : EncodingMode::Progressive;
 
     QMetaObject::invokeMethod(
         this,
@@ -1077,15 +1017,11 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         },
         Qt::BlockingQueuedConnection); // RDP callbacks are on the connection thread, VideoStream operates on the main thread
     qCDebug(KRDP) << "Selected encoding mode:" << encodingModeName(negotiatedMode);
+    qCDebug(KRDP) << "Selected caps:" << capVersionToString(capabilities->capsSet.version);
 
-    auto maxVersion = std::max_element(capsInformation.begin(), capsInformation.end(), [](const auto &first, const auto &second) {
-        return first.version < second.version;
-    });
-
-    qCDebug(KRDP) << "Selected caps:" << capVersionToString(maxVersion->version);
-
-    RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
-    capsConfirmPdu.capsSet = &(maxVersion->capSet);
+    RDPGFX_CAPSET capsSet = capabilities->capsSet;
+    RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu = {};
+    capsConfirmPdu.capsSet = &capsSet;
     const UINT status = d->gfxContext->CapsConfirm(d->gfxContext.get(), &capsConfirmPdu);
     if (status != CHANNEL_RC_OK) {
         qCWarning(KRDP) << "CapsConfirm failed" << status;
@@ -1223,8 +1159,8 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
         frameData.image = std::move(image);
     }
 
-    if (stream.nvencEncoder) {
-        stream.nvencEncoder->encode(frameData.image);
+    if (stream.encoder) {
+        stream.encoder->encode(frameData.image);
         return;
     }
     stream.lastImage = frameData.image;
@@ -1298,7 +1234,7 @@ bool VideoStream::createSurface(int monitor)
 
     const QSize size = output.size;
 
-    RDPGFX_CREATE_SURFACE_PDU createSurfacePdu;
+    RDPGFX_CREATE_SURFACE_PDU createSurfacePdu = {};
     createSurfacePdu.width = size.width();
     createSurfacePdu.height = size.height();
     uint16_t surfaceId = d->nextSurfaceId++;
@@ -1325,7 +1261,7 @@ bool VideoStream::createSurface(int monitor)
     }
 
     // Place the surface where the monitor is in the client's framebuffer.
-    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU mapSurfaceToOutputPdu;
+    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU mapSurfaceToOutputPdu = {};
     mapSurfaceToOutputPdu.outputOriginX = output.origin.x();
     mapSurfaceToOutputPdu.outputOriginY = output.origin.y();
     mapSurfaceToOutputPdu.surfaceId = surfaceId;
@@ -1371,7 +1307,7 @@ void VideoStream::performReset(const QRect &desktop, int monitor)
         monitors.push_back(monitorDef);
     }
 
-    RDPGFX_RESET_GRAPHICS_PDU resetGraphicsPdu;
+    RDPGFX_RESET_GRAPHICS_PDU resetGraphicsPdu = {};
     resetGraphicsPdu.width = desktop.width();
     resetGraphicsPdu.height = desktop.height();
     resetGraphicsPdu.monitorCount = monitors.size();
@@ -1411,7 +1347,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 {
     auto peer = d->session->rdpPeer();
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-        if (d->activeEncodingMode == EncodingMode::H264) {
+        if (isVideo(d->activeEncodingMode)) {
             // The next frames can't be decoded without this one.
             requestKeyFrame(frame.monitor);
         }
@@ -1442,26 +1378,29 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         newSurface = false;
     }
 
-    if (newSurface && d->activeEncodingMode == EncodingMode::H264 && !frame.isKeyFrame) {
+    if (newSurface && isVideo(d->activeEncodingMode) && !frame.isKeyFrame) {
         // The client can't decode this frame on a new surface.
         requestKeyFrame(frame.monitor);
     }
 
-    if (d->activeEncodingMode == EncodingMode::H264) {
-        sendFrameH264(frame, output.surface);
+    if (!frame.data.isEmpty()) {
+        // Sent as what it was encoded to, rather than by the encoding mode: a
+        // packet taken from the queue just before AV1 fell back to H.264 is
+        // still AV1, which the client decodes with the capabilities confirmed.
+        sendFrameVideo(frame, output.surface, frame.isAv1 ? RDPGFX_CODECID_AV1 : RDPGFX_CODECID_AVC420);
     } else if (d->activeEncodingMode == EncodingMode::Progressive) {
         sendFrameProgressive(frame, output.surface);
     }
 }
 
-void VideoStream::sendFrameH264(const VideoFrame &frame, const Surface &surface)
+void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface, uint16_t codecId)
 {
     if (frame.data.isEmpty()) {
         return;
     }
 
     if (surface.id == 0) {
-        qCWarning(KRDP) << "No graphics surface available for H264 frame submission";
+        qCWarning(KRDP) << "No graphics surface available for video frame submission";
         return;
     }
 
@@ -1476,8 +1415,8 @@ void VideoStream::sendFrameH264(const VideoFrame &frame, const Surface &surface)
         d->pendingFrames.insert(frameId);
     }
 
-    RDPGFX_START_FRAME_PDU startFramePdu;
-    RDPGFX_END_FRAME_PDU endFramePdu;
+    RDPGFX_START_FRAME_PDU startFramePdu = {};
+    RDPGFX_END_FRAME_PDU endFramePdu = {};
 
     auto now = QDateTime::currentDateTimeUtc().time();
     startFramePdu.timestamp = now.hour() << 22 | now.minute() << 16 | now.second() << 10 | now.msec();
@@ -1485,9 +1424,10 @@ void VideoStream::sendFrameH264(const VideoFrame &frame, const Surface &surface)
     startFramePdu.frameId = frameId;
     endFramePdu.frameId = frameId;
 
-    RDPGFX_SURFACE_COMMAND surfaceCommand;
+    RDPGFX_SURFACE_COMMAND surfaceCommand = {};
     surfaceCommand.surfaceId = surface.id;
-    surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
+    // AV1 is sent like AVC420.
+    surfaceCommand.codecId = codecId;
     surfaceCommand.contextId = 0;
     surfaceCommand.format = PIXEL_FORMAT_BGRX32;
     surfaceCommand.left = 0;
@@ -1499,18 +1439,18 @@ void VideoStream::sendFrameH264(const VideoFrame &frame, const Surface &surface)
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
 
-    RDPGFX_AVC420_BITMAP_STREAM avcStream;
+    RDPGFX_AVC420_BITMAP_STREAM avcStream = {};
     surfaceCommand.extra = &avcStream;
 
     avcStream.data = (BYTE *)frame.data.data();
     avcStream.length = frame.data.length();
 
-    RECTANGLE_16 regionRect;
+    RECTANGLE_16 regionRect = {};
     regionRect.left = 0;
     regionRect.top = 0;
     regionRect.right = frame.size.width();
     regionRect.bottom = frame.size.height();
-    RDPGFX_H264_QUANT_QUALITY quality;
+    RDPGFX_H264_QUANT_QUALITY quality = {};
     quality.qp = 22;
     quality.p = 0;
     quality.qualityVal = 100;
@@ -1586,8 +1526,8 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
         d->pendingFrames.insert(frameId);
     }
 
-    RDPGFX_START_FRAME_PDU startFramePdu;
-    RDPGFX_END_FRAME_PDU endFramePdu;
+    RDPGFX_START_FRAME_PDU startFramePdu = {};
+    RDPGFX_END_FRAME_PDU endFramePdu = {};
 
     auto now = QDateTime::currentDateTimeUtc().time();
     startFramePdu.timestamp = now.hour() << 22 | now.minute() << 16 | now.second() << 10 | now.msec();
@@ -1597,7 +1537,7 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
 
     const RECTANGLE_16 *extents = region16_extents(&*invalidRegion);
 
-    RDPGFX_SURFACE_COMMAND surfaceCommand;
+    RDPGFX_SURFACE_COMMAND surfaceCommand = {};
     surfaceCommand.surfaceId = surface.id;
     surfaceCommand.codecId = RDPGFX_CODECID_CAPROGRESSIVE;
     surfaceCommand.contextId = surface.codecContextId;

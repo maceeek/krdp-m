@@ -1,7 +1,8 @@
 # Maintainer: KRdp-M contributors
 #
 # Builds krdp with virtual display support from this repository and replaces
-# the krdp package of Arch Linux / CachyOS.
+# the krdp package of Arch Linux / CachyOS. Needs FreeRDP-M, install
+# freerdp-m-git from https://github.com/maceeek/freerdp-m first.
 #
 #   cd packaging/archlinux && makepkg -si
 #
@@ -11,12 +12,12 @@
 pkgname=krdp-m-git
 pkgver=6.7.5.r0.g0000000
 pkgrel=1
-pkgdesc='KDE RDP server with virtual displays that follow the client and NVENC encoding (fork of krdp)'
+pkgdesc='KDE RDP server with virtual displays that follow the client, NVENC and AV1 encoding (fork of krdp)'
 arch=(x86_64)
 url='https://github.com/maceeek/krdp-m'
 license=(LGPL-2.0-or-later)
 depends=(ffmpeg
-         freerdp
+         freerdp-m-git
          gcc-libs
          glibc
          kcmutils
