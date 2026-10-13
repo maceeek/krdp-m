@@ -16,13 +16,20 @@
 namespace KRdp
 {
 
-template<typename ReturnType, typename... MethodArgs, typename... CallArgs>
-static BOOL invokeOnInputHandlerThread(InputHandler *inputHandler, ReturnType (InputHandler::*method)(MethodArgs...), CallArgs &&...args)
+// Not waiting for the input handler: the connection thread would stall on every
+// input event until the main thread gets to it, and with it sending the video.
+// Queued calls are handled in order.
+template<typename... MethodArgs, typename... CallArgs>
+static BOOL invokeOnInputHandlerThread(InputHandler *inputHandler, bool (InputHandler::*method)(MethodArgs...), CallArgs... args)
 {
-    bool handled = false;
-    QMetaObject::invokeMethod(inputHandler, method, Qt::BlockingQueuedConnection, qReturnArg(handled), std::forward<CallArgs>(args)...);
+    QMetaObject::invokeMethod(
+        inputHandler,
+        [inputHandler, method, args...]() {
+            (inputHandler->*method)(args...);
+        },
+        Qt::QueuedConnection);
 
-    return handled ? TRUE : FALSE;
+    return TRUE;
 }
 
 BOOL inputSynchronizeEvent(rdpInput *input, uint32_t flags)
@@ -41,6 +48,11 @@ BOOL inputMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
 
 BOOL inputExtendedMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
 {
+    // Refused by extendedMouseEvent().
+    if (!(flags & PTR_FLAGS_MOVE) && !(flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2))) {
+        return FALSE;
+    }
+
     auto context = reinterpret_cast<PeerContext *>(input->context);
 
     return invokeOnInputHandlerThread(context->inputHandler, &InputHandler::extendedMouseEvent, x, y, flags);

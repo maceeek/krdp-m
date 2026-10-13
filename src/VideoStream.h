@@ -125,6 +125,11 @@ private:
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
 
     void onPacketReceived(int monitor, const PipeWireEncodedStream::Packet &data);
+    /**
+     * Have KPipeWire drop the frames of \p monitor before encoding them while
+     * too many are waiting to be sent. Needs KPipeWire 6.8.
+     */
+    void updateBackpressure(int monitor);
     void onFrameReceived(int monitor, const PipeWireFrame &frame);
     void onCursorChanged(int monitor, const PipeWireCursor &cursor);
     void setActiveEncodingMode(EncodingMode mode);
@@ -142,6 +147,11 @@ private:
     bool createSurface(int monitor);
     void performReset(const QRect &desktop, int monitor);
     bool hasInFlightCapacity() const;
+    void wakeFrameSubmission();
+    /**
+     * Forget about frame \p frameId, which was not sent after all.
+     */
+    void unregisterFrame(uint32_t frameId);
     void sendFrame(const VideoFrame &frame);
     void sendFrameH264(const VideoFrame &frame, const Surface &surface);
     void sendFrameProgressive(const VideoFrame &frame, const Surface &surface);

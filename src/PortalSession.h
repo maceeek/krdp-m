@@ -61,8 +61,11 @@ private:
      * Input must reach the portal implementation in the order it was
      * generated, which requires that only one Notify* method call is ever in
      * flight. See dispatchNextInputCall().
+     *
+     * \p pointerMotion is set for absolute pointer motion, which replaces
+     * motion that is still waiting to be sent.
      */
-    void enqueueInputCall(std::function<QDBusPendingCall()> &&call);
+    void enqueueInputCall(std::function<QDBusPendingCall()> &&call, bool pointerMotion = false);
     void dispatchNextInputCall();
 
     class Private;

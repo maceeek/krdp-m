@@ -11,7 +11,11 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <mutex>
+#include <numeric>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -27,6 +31,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
 #include <freerdp/update.h>
+#include <kpipewire_version.h>
 #include <qassert.h>
 
 #include "NetworkDetection.h"
@@ -44,6 +49,14 @@ namespace clk = std::chrono;
 // Maximum number of frames to contain in the queue.
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
 constexpr qsizetype MaximumInFlightFrames = 2;
+// The smallest change of the requested frame rate that is applied.
+constexpr int MinimumFrameRateChange = 2;
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+// The number of frames of a monitor waiting to be sent above which KPipeWire
+// drops frames before encoding them, and below which it encodes them again.
+constexpr qsizetype HighQueueCount = 3;
+constexpr qsizetype LowQueueCount = 1;
+#endif
 constexpr uint32_t ProgressiveCodecContextId = 1;
 struct RdpCapsInformation {
     uint32_t version;
@@ -117,6 +130,75 @@ struct FrameRateEstimate {
     int estimate = 0;
 };
 
+/**
+ * Memory for the images frames are copied into, reused once their images are
+ * gone. Allocating images as big as a frame anew costs page faults and having
+ * the memory cleared every frame.
+ */
+class ImagePool : public std::enable_shared_from_this<ImagePool>
+{
+public:
+    /**
+     * An image of \p size in \p format with four bytes per pixel, its
+     * contents undefined.
+     */
+    QImage take(const QSize &size, QImage::Format format)
+    {
+        if (size.isEmpty()) {
+            return QImage();
+        }
+
+        const qsizetype bytesPerLine = qsizetype(size.width()) * 4;
+        const qsizetype bytes = bytesPerLine * size.height();
+
+        auto buffer = std::make_unique<Buffer>();
+        buffer->pool = shared_from_this();
+        {
+            std::lock_guard lock(mutex);
+            if (bytes != bufferSize) {
+                freeMemory.clear();
+                bufferSize = bytes;
+            }
+            if (!freeMemory.empty()) {
+                buffer->memory = std::move(freeMemory.back());
+                freeMemory.pop_back();
+            }
+        }
+        if (!buffer->memory) {
+            buffer->memory = std::make_unique_for_overwrite<uchar[]>(bytes);
+        }
+        buffer->size = bytes;
+
+        uchar *data = buffer->memory.get();
+        return QImage(data, size.width(), size.height(), bytesPerLine, format, &ImagePool::release, buffer.release());
+    }
+
+private:
+    // Usually one image is taken for every one that is released.
+    static constexpr std::size_t MaximumFreeBuffers = 2;
+
+    struct Buffer {
+        std::shared_ptr<ImagePool> pool;
+        std::unique_ptr<uchar[]> memory;
+        qsizetype size = 0;
+    };
+
+    // Called when the last copy of an image is gone, on any thread.
+    static void release(void *info)
+    {
+        std::unique_ptr<Buffer> buffer(static_cast<Buffer *>(info));
+        auto &pool = *buffer->pool;
+        std::lock_guard lock(pool.mutex);
+        if (buffer->size == pool.bufferSize && pool.freeMemory.size() < MaximumFreeBuffers) {
+            pool.freeMemory.push_back(std::move(buffer->memory));
+        }
+    }
+
+    std::mutex mutex;
+    qsizetype bufferSize = 0;
+    std::vector<std::unique_ptr<uchar[]>> freeMemory;
+};
+
 class KRDP_NO_EXPORT VideoStream::Private
 {
 public:
@@ -162,6 +244,7 @@ public:
         bool encoderRestartPending = false;
         // The latest raw frame, to repaint the surface after it was recreated.
         QImage lastImage;
+        const std::shared_ptr<ImagePool> imagePool = std::make_shared<ImagePool>();
     };
 
     /**
@@ -217,14 +300,18 @@ public:
     QRect desktop;
     bool pendingReset = true;
 
-    bool enabled = false;
+    // Set from the connection thread, read from the encoding and frame
+    // submission threads.
+    std::atomic_bool enabled = false;
     bool streamingEnabled = false;
-    bool capsConfirmed = false;
+    std::atomic_bool capsConfirmed = false;
     bool channelOpen = false;
 
     std::jthread frameSubmissionThread;
     std::mutex frameQueueMutex;
-    // Notified when a frame is queued.
+    // Notified when a frame is queued or the frame submission thread may be
+    // able to send one again: a frame was acknowledged or the capabilities
+    // were confirmed.
     std::condition_variable_any frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
@@ -268,6 +355,50 @@ static RECTANGLE_16 toRectangle16(const QRect &rect)
     result.right = rect.right() + 1;
     result.bottom = rect.bottom() + 1;
     return result;
+}
+
+/**
+ * A copy of the frame, PipeWire reuses its memory for later frames.
+ */
+static QImage copyImage(const PipeWireFrameData &data, ImagePool &pool)
+{
+    // What compositors usually provide is laid out like Format_RGB32 in
+    // memory, copying it as is avoids the channel swap and conversion of
+    // toImage().
+    if (Q_BYTE_ORDER == Q_LITTLE_ENDIAN && (data.format == SPA_VIDEO_FORMAT_BGRx || data.format == SPA_VIDEO_FORMAT_BGRA)
+        && data.stride >= data.size.width() * 4) {
+        QImage image = pool.take(data.size, QImage::Format_RGB32);
+        uchar *bits = image.bits();
+        const auto source = static_cast<const uchar *>(data.data);
+        const qsizetype rowSize = qsizetype(data.size.width()) * 4;
+        for (int y = 0; y < data.size.height(); ++y) {
+            memcpy(bits + y * image.bytesPerLine(), source + qsizetype(y) * data.stride, rowSize);
+        }
+        return image;
+    }
+    return data.toImage().convertToFormat(QImage::Format_RGB32);
+}
+
+/**
+ * The FreeRDP pixel format with the memory layout of \p format, if there is one.
+ */
+static std::optional<UINT32> toPixelFormat(QImage::Format format)
+{
+    switch (format) {
+    case QImage::Format_RGB32:
+    case QImage::Format_ARGB32:
+    case QImage::Format_ARGB32_Premultiplied:
+        if (Q_BYTE_ORDER == Q_LITTLE_ENDIAN) {
+            return PIXEL_FORMAT_BGRX32;
+        }
+        return PIXEL_FORMAT_XRGB32;
+    case QImage::Format_RGBX8888:
+    case QImage::Format_RGBA8888:
+    case QImage::Format_RGBA8888_Premultiplied:
+        return PIXEL_FORMAT_RGBX32;
+    default:
+        return std::nullopt;
+    }
 }
 
 static std::optional<REGION16> toRegion16(const QRegion &region, const QRect &frameRect)
@@ -316,15 +447,20 @@ void VideoStream::setActiveEncodingMode(EncodingMode mode)
     }
 
     {
+        // Read by queueFrame() on the encoding threads.
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.clear();
+        d->activeEncodingMode = mode;
     }
-
-    d->activeEncodingMode = mode;
 
     for (std::size_t monitor = 0; monitor < d->streams.size(); ++monitor) {
         createStream(monitor);
     }
+
+    // NVENC encoders queue their frames themselves, until they are destroyed
+    // above.
+    std::lock_guard lock(d->frameQueueMutex);
+    d->frameQueue.clear();
 }
 
 void VideoStream::createStream(int monitor)
@@ -394,20 +530,24 @@ void VideoStream::createStream(int monitor)
             qCInfo(KRDP) << "Encoding monitor" << monitor << "with NVENC";
             stream.nvencEncoder = std::make_unique<NvencEncoder>();
             stream.nvencEncoder->setQuality(d->quality);
-            // Queued to the encoder, so packets of an encoder that was
-            // replaced are dropped with it.
-            connect(stream.nvencEncoder.get(),
-                    &NvencEncoder::packetReady,
-                    stream.nvencEncoder.get(),
-                    [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent) {
-                        VideoFrame frame;
-                        frame.monitor = monitor;
-                        frame.size = size;
-                        frame.data = data;
-                        frame.isKeyFrame = isKeyFrame;
-                        frame.sent = sent;
-                        queueFrame(frame);
-                    });
+            // Queued for sending right on the encoding thread, rather than
+            // waiting for the main thread, which may be busy downloading the
+            // next frame. The encoder stops its thread when it is destroyed,
+            // so no packets of an encoder that was replaced arrive afterwards.
+            connect(
+                stream.nvencEncoder.get(),
+                &NvencEncoder::packetReady,
+                stream.nvencEncoder.get(),
+                [this, monitor](const QByteArray &data, bool isKeyFrame, const QSize &size, const std::shared_ptr<void> &sent) {
+                    VideoFrame frame;
+                    frame.monitor = monitor;
+                    frame.size = size;
+                    frame.data = data;
+                    frame.isKeyFrame = isKeyFrame;
+                    frame.sent = sent;
+                    queueFrame(frame);
+                },
+                Qt::DirectConnection);
             connect(stream.nvencEncoder.get(), &NvencEncoder::failed, stream.nvencEncoder.get(), [this]() {
                 qCWarning(KRDP) << "NVENC does not work, falling back to KPipeWire for H.264 encoding";
                 d->nvencFailed = true;
@@ -427,17 +567,15 @@ void VideoStream::createStream(int monitor)
         stream.sourceStream->setAllowDmaBuf(true);
         stream.sourceStream->setDamageEnabled(true);
         stream.sourceStream->setMaxFramerate({static_cast<quint32>(d->requestedFrameRate.load()), 1});
-        connect(
-            stream.sourceStream.get(),
-            &PipeWireSourceStream::frameReceived,
-            this,
-            [this, monitor](const PipeWireFrame &frame) {
-                onFrameReceived(monitor, frame);
-                if (frame.cursor) {
-                    onCursorChanged(monitor, *frame.cursor);
-                }
-            },
-            Qt::QueuedConnection);
+        // Handled right away, while PipeWire does not use the buffer of the
+        // frame: once it is given back the compositor may draw the next frame
+        // into it, and it saves a pass through the event loop.
+        connect(stream.sourceStream.get(), &PipeWireSourceStream::frameReceived, this, [this, monitor](const PipeWireFrame &frame) {
+            onFrameReceived(monitor, frame);
+            if (frame.cursor) {
+                onCursorChanged(monitor, *frame.cursor);
+            }
+        });
         connect(stream.sourceStream.get(), &PipeWireSourceStream::streamParametersChanged, this, [this, monitor]() {
             setStreamSize(monitor, d->streams.at(monitor)->sourceStream->size());
         });
@@ -601,22 +739,28 @@ bool VideoStream::initialize()
 
     d->frameSubmissionThread = std::jthread([this](std::stop_token token) {
         while (!token.stop_requested()) {
-            if (!hasInFlightCapacity() || !d->gfxContext || !d->capsConfirmed) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-
             VideoFrame nextFrame;
             {
                 std::unique_lock lock(d->frameQueueMutex);
                 if (!d->frameQueueCondition.wait(lock, token, [this] {
-                        return !d->frameQueue.isEmpty();
+                        return !d->frameQueue.isEmpty() && d->capsConfirmed && hasInFlightCapacity();
                     })) {
                     break;
                 }
                 nextFrame = d->frameQueue.takeFirst();
             }
             sendFrame(nextFrame);
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+            // Frames encoded by KPipeWire, its encoder may wait for them to be sent.
+            if (!nextFrame.data.isEmpty() && !nextFrame.sent) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, monitor = nextFrame.monitor]() {
+                        updateBackpressure(monitor);
+                    },
+                    Qt::QueuedConnection);
+            }
+#endif
         }
     });
 
@@ -658,6 +802,8 @@ void VideoStream::close()
     {
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.clear();
+        // Read by queueFrame() on the encoding threads.
+        d->activeEncodingMode.reset();
     }
 
     destroySurfaces();
@@ -669,7 +815,6 @@ void VideoStream::close()
         }
         d->gfxContext.reset();
     }
-    d->activeEncodingMode.reset();
     d->initialized = false;
 
     Q_EMIT closed();
@@ -942,6 +1087,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     }
 
     d->capsConfirmed = true;
+    wakeFrameSubmission();
 
     return CHANNEL_RC_OK;
 }
@@ -950,18 +1096,40 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 {
     auto id = frameAcknowledge->frameId;
 
-    std::lock_guard lock(d->pendingFramesMutex);
+    {
+        std::lock_guard lock(d->pendingFramesMutex);
 
-    auto itr = d->pendingFrames.constFind(id);
-    if (itr == d->pendingFrames.cend()) {
-        qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
-        return CHANNEL_RC_OK;
+        auto itr = d->pendingFrames.constFind(id);
+        if (itr == d->pendingFrames.cend()) {
+            qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
+            return CHANNEL_RC_OK;
+        }
+
+        d->frameDelay = d->encodedFrames - frameAcknowledge->totalFramesDecoded;
+        d->pendingFrames.erase(itr);
     }
 
-    d->frameDelay = d->encodedFrames - frameAcknowledge->totalFramesDecoded;
-    d->pendingFrames.erase(itr);
+    // Send the next frame right away.
+    wakeFrameSubmission();
 
     return CHANNEL_RC_OK;
+}
+
+void VideoStream::wakeFrameSubmission()
+{
+    {
+        // Not missing the notification while the frame submission thread
+        // checks whether it can send a frame.
+        std::lock_guard lock(d->frameQueueMutex);
+    }
+    d->frameQueueCondition.notify_one();
+}
+
+void VideoStream::unregisterFrame(uint32_t frameId)
+{
+    d->encodedFrames--;
+    std::lock_guard lock(d->pendingFramesMutex);
+    d->pendingFrames.remove(frameId);
 }
 
 void VideoStream::onPacketReceived(int monitor, const PipeWireEncodedStream::Packet &data)
@@ -978,6 +1146,43 @@ void VideoStream::onPacketReceived(int monitor, const PipeWireEncodedStream::Pac
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
     queueFrame(frameData);
+    updateBackpressure(monitor);
+}
+
+void VideoStream::updateBackpressure(int monitor)
+{
+#if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
+    // Encoded H.264 frames can't be dropped anymore. When the client takes
+    // them slower than KPipeWire encodes them they queue up, adding latency
+    // until the next key frame. Instead KPipeWire drops frames before encoding
+    // them while many are queued, and encodes the latest one once few are left.
+    if (monitor < 0 || monitor >= int(d->streams.size())) {
+        return;
+    }
+    const auto &encodedStream = d->streams.at(monitor)->encodedStream;
+    if (!encodedStream) {
+        return;
+    }
+
+    qsizetype queued = 0;
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        queued = std::count_if(d->frameQueue.cbegin(), d->frameQueue.cend(), [monitor](const VideoFrame &frame) {
+            return frame.monitor == monitor;
+        });
+    }
+
+    const bool paused = encodedStream->encoderPaused();
+    if (!paused && queued > HighQueueCount) {
+        qCDebug(KRDP) << "Pausing the encoder of monitor" << monitor << "with" << queued << "frames queued";
+        encodedStream->setEncoderPaused(true);
+    } else if (paused && queued < LowQueueCount) {
+        qCDebug(KRDP) << "Resuming the encoder of monitor" << monitor;
+        encodedStream->setEncoderPaused(false);
+    }
+#else
+    Q_UNUSED(monitor);
+#endif
 }
 
 void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
@@ -986,6 +1191,11 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
     if (!data.dataFrame && !data.dmabuf) {
         return;
     }
+
+    if (monitor >= int(d->streams.size())) {
+        return;
+    }
+    auto &stream = *d->streams.at(monitor);
 
     VideoFrame frameData;
     frameData.monitor = monitor;
@@ -997,9 +1207,9 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
     }
 
     if (data.dataFrame) {
-        frameData.image = data.dataFrame->toImage().convertToFormat(QImage::Format_RGB32);
+        frameData.image = copyImage(*data.dataFrame, *stream.imagePool);
     } else {
-        QImage image(frameData.size, QImage::Format_RGBA8888_Premultiplied);
+        QImage image = stream.imagePool->take(frameData.size, QImage::Format_RGBA8888_Premultiplied);
         if (!d->dmaBufHandler.downloadFrame(image, data)) {
             qCWarning(KRDP) << "Failed to download DMA-BUF frame";
             return;
@@ -1007,10 +1217,6 @@ void VideoStream::onFrameReceived(int monitor, const PipeWireFrame &data)
         frameData.image = std::move(image);
     }
 
-    if (monitor >= int(d->streams.size())) {
-        return;
-    }
-    auto &stream = *d->streams.at(monitor);
     if (stream.nvencEncoder) {
         stream.nvencEncoder->encode(frameData.image);
         return;
@@ -1293,35 +1499,26 @@ void VideoStream::sendFrameH264(const VideoFrame &frame, const Surface &surface)
     avcStream.data = (BYTE *)frame.data.data();
     avcStream.length = frame.data.length();
 
+    RECTANGLE_16 regionRect;
+    regionRect.left = 0;
+    regionRect.top = 0;
+    regionRect.right = frame.size.width();
+    regionRect.bottom = frame.size.height();
+    RDPGFX_H264_QUANT_QUALITY quality;
+    quality.qp = 22;
+    quality.p = 0;
+    quality.qualityVal = 100;
     avcStream.meta.numRegionRects = 1;
-    auto rects = std::make_unique<RECTANGLE_16[]>(1);
-    rects[0].left = 0;
-    rects[0].top = 0;
-    rects[0].right = frame.size.width();
-    rects[0].bottom = frame.size.height();
-    avcStream.meta.regionRects = rects.get();
-    auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(1);
-    avcStream.meta.quantQualityVals = qualities.get();
-    qualities[0].qp = 22;
-    qualities[0].p = 0;
-    qualities[0].qualityVal = 100;
+    avcStream.meta.regionRects = &regionRect;
+    avcStream.meta.quantQualityVals = &quality;
 
-    const UINT startStatus = d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
-    if (startStatus != CHANNEL_RC_OK) {
-        qCWarning(KRDP) << "StartFrame failed" << startStatus << "frameId" << frameId;
-        d->session->networkDetection()->stopBandwidthMeasure();
-        return;
-    }
-
-    const UINT commandStatus = d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
-    if (commandStatus != CHANNEL_RC_OK) {
-        qCWarning(KRDP) << "SurfaceCommand failed" << commandStatus << "frameId" << frameId << "surface" << surface.id << "encodedBytes"
-                        << frame.data.size();
-    }
-
-    const UINT endStatus = d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
-    if (endStatus != CHANNEL_RC_OK) {
-        qCWarning(KRDP) << "EndFrame failed" << endStatus << "frameId" << frameId;
+    // Starting and ending the frame in the same message as the frame itself
+    // means one write to the channel instead of three.
+    const UINT status = d->gfxContext->SurfaceFrameCommand(d->gfxContext.get(), &surfaceCommand, &startFramePdu, &endFramePdu);
+    if (status != CHANNEL_RC_OK) {
+        qCWarning(KRDP) << "SurfaceFrameCommand failed" << status << "frameId" << frameId << "surface" << surface.id << "encodedBytes" << frame.data.size();
+        // The client will never acknowledge it.
+        unregisterFrame(frameId);
     }
 
     d->session->networkDetection()->stopBandwidthMeasure();
@@ -1338,7 +1535,13 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
         return;
     }
 
-    QImage image = frame.image.convertToFormat(QImage::Format_RGB32);
+    // The codec reads the common formats as they are.
+    QImage image = frame.image;
+    auto pixelFormat = toPixelFormat(image.format());
+    if (!pixelFormat) {
+        image = image.convertToFormat(QImage::Format_RGB32);
+        pixelFormat = toPixelFormat(image.format());
+    }
     const QRect frameRect(QPoint(0, 0), image.size());
     auto invalidRegion = toRegion16(frame.damage, frameRect);
     if (!invalidRegion) {
@@ -1352,7 +1555,7 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
     const int compressionStatus = progressive_compress(d->progressive.get(),
                                                        image.constBits(),
                                                        image.sizeInBytes(),
-                                                       PIXEL_FORMAT_BGRX32,
+                                                       *pixelFormat,
                                                        image.width(),
                                                        image.height(),
                                                        image.bytesPerLine(),
@@ -1407,6 +1610,8 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
     if (status != CHANNEL_RC_OK) {
         qCWarning(KRDP) << "SurfaceFrameCommand failed" << status << "frameId" << frameId << "surface" << surface.id << "encodedBytes" << encodedSize
                         << "damageRects" << rectCount;
+        // The client will never acknowledge it.
+        unregisterFrame(frameId);
     }
 
     d->session->networkDetection()->stopBandwidthMeasure();
@@ -1432,21 +1637,27 @@ void VideoStream::updateRequestedFrameRate()
     d->frameRateEstimates.erase(std::remove_if(d->frameRateEstimates.begin(),
                                                d->frameRateEstimates.end(),
                                                [now](const auto &estimate) {
-                                                   return (estimate.timeStamp - now) > FrameRateEstimateAveragePeriod;
+                                                   return (now - estimate.timeStamp) > FrameRateEstimateAveragePeriod;
                                                }),
                                 d->frameRateEstimates.cend());
 
     auto sum = std::accumulate(d->frameRateEstimates.cbegin(), d->frameRateEstimates.cend(), 0, [](int acc, const auto &estimate) {
         return acc + estimate.estimate;
     });
-    auto average = sum / d->frameRateEstimates.size();
+    auto average = qreal(sum) / d->frameRateEstimates.size();
 
     // we want some headroom so we can always clear our current load
     // and handle any other latency
     constexpr qreal targetFrameRateSaturation = 0.5;
-    auto frameRate = std::max(1.0, average * targetFrameRateSaturation);
+    const int frameRate = std::max(1, qRound(average * targetFrameRateSaturation));
+    const int maximumFrameRate = qRound(d->maximumFrameRate * targetFrameRateSaturation);
 
-    if (frameRate != d->requestedFrameRate) {
+    // Every change renegotiates the PipeWire streams, which holds back frames
+    // for a moment. Small changes are not worth that, except to get back to
+    // the maximum.
+    const int currentFrameRate = d->requestedFrameRate;
+    const bool significant = std::abs(frameRate - currentFrameRate) >= std::max(MinimumFrameRateChange, currentFrameRate / 10);
+    if (frameRate != currentFrameRate && (significant || frameRate == maximumFrameRate)) {
         d->requestedFrameRate = frameRate;
         for (const auto &stream : d->streams) {
             if (stream->encodedStream) {
