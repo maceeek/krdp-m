@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "NetworkDetection.h"
+#include "NetworkDetection_p.h"
 
 #include <ranges>
 
@@ -54,20 +55,20 @@ struct RTTMeasurement {
 class NetworkDetection::Private
 {
 public:
-    uint32_t nextSequenceNumber();
+    std::optional<uint16_t> nextSequenceNumber();
 
     RdpConnection *session = nullptr;
     rdpAutoDetect *rdpAutodetect = nullptr;
 
     State state = State::None;
 
-    uint32_t sequenceNumber = 0;
+    uint16_t sequenceNumber = 0;
 
     uint32_t lastBandwithMeasurement;
 
     bool rttEnabled = false;
     clk::system_clock::time_point lastRttUpdate;
-    QHash<uint32_t, clk::system_clock::time_point> rttRequests;
+    QHash<uint16_t, clk::system_clock::time_point> rttRequests;
     std::vector<RTTMeasurement> rttMeasurements;
 
     clk::system_clock::duration minimumRtt;
@@ -136,8 +137,11 @@ void NetworkDetection::update()
     d->lastRttUpdate = now;
 
     auto sequence = d->nextSequenceNumber();
-    d->rttRequests.insert(sequence, now);
-    d->rdpAutodetect->RTTMeasureRequest(d->rdpAutodetect, RDP_TRANSPORT_TCP, sequence);
+    if (!sequence) {
+        return;
+    }
+    d->rttRequests.insert(*sequence, now);
+    d->rdpAutodetect->RTTMeasureRequest(d->rdpAutodetect, RDP_TRANSPORT_TCP, *sequence);
 }
 
 bool NetworkDetection::onRttMeasureResponse(uint16_t sequence)
@@ -218,17 +222,14 @@ void NetworkDetection::updateAverageRtt()
     result.baseRTT = clk::duration_cast<clk::milliseconds>(d->minimumRtt).count();
     result.averageRTT = clk::duration_cast<clk::milliseconds>(d->averageRtt).count();
     result.bandwidth = d->lastBandwithMeasurement;
-    d->rdpAutodetect->NetworkCharacteristicsResult(d->rdpAutodetect, RDP_TRANSPORT_TCP, d->nextSequenceNumber(), &result);
+    if (const auto sequence = d->nextSequenceNumber()) {
+        d->rdpAutodetect->NetworkCharacteristicsResult(d->rdpAutodetect, RDP_TRANSPORT_TCP, *sequence, &result);
+    }
 }
 
-uint32_t NetworkDetection::Private::nextSequenceNumber()
+std::optional<uint16_t> NetworkDetection::Private::nextSequenceNumber()
 {
-    auto sequence = sequenceNumber;
-    while (sequence == 0 || rttRequests.contains(sequence)) {
-        ++sequence;
-    }
-    sequenceNumber = sequence + 1;
-    return sequence;
+    return nextRdpSequenceNumber(sequenceNumber, rttRequests);
 }
 
 } // namespace KRdp

@@ -38,6 +38,7 @@ target_sources(KRdp PRIVATE
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
+    NetworkDetection_p.h
     FrameEncoder.cpp
     FrameEncoder.h
     NvencEncoder.cpp
