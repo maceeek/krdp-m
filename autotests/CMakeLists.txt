@@ -28,3 +28,8 @@ add_test(NAME av1encodertest COMMAND av1encodertest)
 add_executable(gfxcapabilitiestest gfxcapabilitiestest.cpp)
 target_link_libraries(gfxcapabilitiestest PRIVATE Qt6::Test KRdp)
 add_test(NAME gfxcapabilitiestest COMMAND gfxcapabilitiestest)
+
+add_executable(networkdetectionsequencetest networkdetectionsequencetest.cpp)
+target_include_directories(networkdetectionsequencetest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(networkdetectionsequencetest PRIVATE Qt6::Test)
+add_test(NAME networkdetectionsequencetest COMMAND networkdetectionsequencetest)
