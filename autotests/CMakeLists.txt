@@ -33,3 +33,8 @@ add_executable(networkdetectionsequencetest networkdetectionsequencetest.cpp)
 target_include_directories(networkdetectionsequencetest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(networkdetectionsequencetest PRIVATE Qt6::Test)
 add_test(NAME networkdetectionsequencetest COMMAND networkdetectionsequencetest)
+
+add_executable(videopacingtest videopacingtest.cpp)
+target_include_directories(videopacingtest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(videopacingtest PRIVATE Qt6::Test)
+add_test(NAME videopacingtest COMMAND videopacingtest)

@@ -4,6 +4,8 @@
 
 #include "Av1Encoder.h"
 
+#include <algorithm>
+
 #include <freerdp/codec/av1.h>
 #include <freerdp/codec/h264.h>
 
@@ -120,10 +122,17 @@ bool Av1Encoder::Private::open(const QSize &newSize, quint8 newQuality)
         return false;
     }
 
-    // 4:2:0, constant quality without a bitrate limit, like H.264.
+    // Bound quality-mode bursts on variable-capacity links. The default is
+    // 8 Mbit/s per megapixel, capped at 60 Mbit/s. Zero explicitly opts out.
+    bool bitrateSet = false;
+    const int configuredBitrate = qEnvironmentVariableIntValue("KRDP_AV1_BITRATE", &bitrateSet);
+    const quint32 bitrate = bitrateSet && configuredBitrate >= 0
+        ? std::min(configuredBitrate, 200000)
+        : std::clamp(qint64(newSize.width()) * newSize.height() * 8 / 1000, qint64(4000), qint64(60000));
+    // AV1 main profile, constant quality subject to the bitrate ceiling.
     if (!freerdp_av1_context_set_option(context, FREERDP_AV1_CONTEXT_OPTION_PROFILE, 0)
         || !freerdp_av1_context_set_option(context, FREERDP_AV1_CONTEXT_OPTION_RATECONTROL, FREERDP_AV1_CQ)
-        || !freerdp_av1_context_set_option(context, FREERDP_AV1_CONTEXT_OPTION_BITRATE, 0)
+        || !freerdp_av1_context_set_option(context, FREERDP_AV1_CONTEXT_OPTION_BITRATE, bitrate)
         || !freerdp_av1_context_set_option(context, FREERDP_AV1_CONTEXT_OPTION_QUALITY, newQuality)) {
         qCWarning(KRDP) << "Could not configure the AV1 encoder";
         return false;
@@ -136,7 +145,7 @@ bool Av1Encoder::Private::open(const QSize &newSize, quint8 newQuality)
 
     size = newSize;
     contextQuality = newQuality;
-    qCDebug(KRDP) << "Opened AV1 encoder at size" << size << "with quality" << newQuality;
+    qCInfo(KRDP) << "Opened AV1 encoder at size" << size << "with quality" << newQuality << "max kbit/s" << bitrate;
     return true;
 }
 

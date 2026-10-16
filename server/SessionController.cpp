@@ -112,7 +112,8 @@ public:
             const QPointF position = mouseEvent->position();
             m_pointerMonitor = std::min<int>(KRdp::monitorAt(layout, position), sessions.size() - 1);
             const QPointF local = position - QPointF(layout.value(m_pointerMonitor).rect.topLeft());
-            auto localEvent = std::make_shared<QMouseEvent>(QEvent::MouseMove, local, local, mouseEvent->button(), mouseEvent->buttons(), mouseEvent->modifiers());
+            auto localEvent =
+                std::make_shared<QMouseEvent>(QEvent::MouseMove, local, local, mouseEvent->button(), mouseEvent->buttons(), mouseEvent->modifiers());
             sessions.at(m_pointerMonitor)->sendEvent(localEvent);
             break;
         }
@@ -291,7 +292,8 @@ void SessionController::startSession(KRdp::RdpConnection *connection)
         }
         const bool multipleSupported = plasmaScreencastAvailable();
         if (clientLayout.size() > 1 && !multipleSupported) {
-            qWarning() << "The client has" << clientLayout.size() << "monitors, only using the primary one as the Plasma screencasting protocol is not available";
+            qWarning() << "The client has" << clientLayout.size()
+                       << "monitors, only using the primary one as the Plasma screencasting protocol is not available";
         }
         const int count = multipleSupported ? std::min<int>(clientLayout.size(), KRdp::DisplayControl::MaximumMonitors) : 1;
         const auto layout = virtualMonitorLayout(clientLayout, count);
@@ -314,9 +316,12 @@ void SessionController::startSession(KRdp::RdpConnection *connection)
         }
 
         if (!m_virtualMonitor) {
-            connect(connection->displayControl(), &KRdp::DisplayControl::requestedLayoutChanged, wrapper.get(), [this, wrapper = wrapper.get()](const KRdp::MonitorLayout &requested) {
-                applyRequestedLayout(wrapper, requested);
-            });
+            connect(connection->displayControl(),
+                    &KRdp::DisplayControl::requestedLayoutChanged,
+                    wrapper.get(),
+                    [this, wrapper = wrapper.get()](const KRdp::MonitorLayout &requested) {
+                        applyRequestedLayout(wrapper, requested);
+                    });
         }
     } else {
         wrapper->addSession(makeSession(false));
@@ -369,14 +374,16 @@ void SessionController::applyRequestedLayout(SessionWrapper *wrapper, const KRdp
     }
     if (requested.size() != count) {
         if (count != 1) {
-            qWarning() << "The client changed from" << count << "to" << requested.size()
-                       << "monitors, changing the number of monitors needs a reconnect";
+            qWarning() << "The client changed from" << count << "to" << requested.size() << "monitors, changing the number of monitors needs a reconnect";
             return;
         }
         // With a single virtual monitor, follow the primary monitor.
     }
 
     const auto layout = virtualMonitorLayout(requested, count);
+    if (layout == wrapper->layout) {
+        return;
+    }
     const auto positions = KRdp::logicalPositions(layout);
 
     wrapper->setLayout(layout);

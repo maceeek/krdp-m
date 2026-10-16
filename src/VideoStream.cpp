@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoStream.h"
+#include "VideoStream_p.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -21,9 +22,9 @@
 #include <unistd.h>
 
 #include <QDateTime>
+#include <QHash>
 #include <QQueue>
 #include <QScopeGuard>
-#include <QSet>
 
 #include <DmaBufHandler>
 #include <PipeWireEncodedStream>
@@ -49,9 +50,7 @@ namespace KRdp
 
 namespace clk = std::chrono;
 
-// Maximum number of frames to contain in the queue.
-constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
-constexpr qsizetype MaximumInFlightFrames = 2;
+constexpr auto FrameRateEstimateAveragePeriod = clk::seconds(1);
 // The smallest change of the requested frame rate that is applied.
 constexpr int MinimumFrameRateChange = 2;
 #if KPIPEWIRE_VERSION >= QT_VERSION_CHECK(6, 7, 90)
@@ -91,10 +90,11 @@ struct Surface {
     uint16_t id = 0;
     uint32_t codecContextId = 0;
     QSize size;
+    VideoFrameGate gate;
 };
 
 struct FrameRateEstimate {
-    clk::system_clock::time_point timeStamp;
+    clk::steady_clock::time_point timeStamp;
     int estimate = 0;
 };
 
@@ -287,17 +287,22 @@ public:
     std::condition_variable_any frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
-    QSet<uint32_t> pendingFrames;
+    QHash<uint32_t, clk::steady_clock::time_point> pendingFrames;
 
     std::mutex pendingFramesMutex;
 
-    int maximumFrameRate = 120;
+    int maximumFrameRate = 60;
+    std::atomic_int inFlightLimit = 2;
+    std::atomic<qint64> acknowledgementUs = 1000;
     std::atomic_int requestedFrameRate = 60;
     QQueue<FrameRateEstimate> frameRateEstimates;
-    clk::system_clock::time_point lastFrameRateEstimation;
+    clk::steady_clock::time_point lastFrameRateEstimation;
 
-    std::atomic_int encodedFrames = 0;
-    std::atomic_int frameDelay = 0;
+    std::atomic_uint64_t sentFrames = 0;
+    std::atomic_uint64_t sentBytes = 0;
+    std::atomic_uint64_t acknowledgedFrames = 0;
+    std::atomic_uint64_t sentKeyFrames = 0;
+    clk::steady_clock::time_point lastStatistics = clk::steady_clock::now();
     bool initialized = false;
     quint8 quality = 100;
 };
@@ -668,16 +673,21 @@ void VideoStream::setMonitorLayout(const MonitorLayout &layout)
     }
 
     std::lock_guard lock(d->outputsMutex);
+    bool resetNeeded = d->outputs.size() != count;
     while (d->outputs.size() > count) {
         destroySurface(d->outputs.back().surface);
         d->outputs.pop_back();
     }
     d->outputs.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
-        d->outputs[i].origin = i < std::size_t(layout.size()) ? layout[i].rect.topLeft() : QPoint();
+        const QPoint origin = i < std::size_t(layout.size()) ? layout[i].rect.topLeft() : QPoint();
+        resetNeeded |= d->outputs[i].origin != origin;
+        d->outputs[i].origin = origin;
         d->outputs[i].expectedSize = i < std::size_t(layout.size()) ? layout[i].rect.size() : QSize();
     }
-    d->pendingReset = true;
+    // Size changes reset the graphics only when a frame at the new size
+    // arrives, after the virtual output resize was debounced and applied.
+    d->pendingReset |= resetNeeded;
 }
 
 int VideoStream::monitorCount() const
@@ -1047,7 +1057,10 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
             return CHANNEL_RC_OK;
         }
 
-        d->frameDelay = d->encodedFrames - frameAcknowledge->totalFramesDecoded;
+        const auto elapsed = std::max<qint64>(1000, clk::duration_cast<clk::microseconds>(clk::steady_clock::now() - itr.value()).count());
+        const auto sample = std::min<qint64>(elapsed, 10000000);
+        d->acknowledgementUs = (7 * d->acknowledgementUs.load() + sample) / 8;
+        ++d->acknowledgedFrames;
         d->pendingFrames.erase(itr);
     }
 
@@ -1069,7 +1082,6 @@ void VideoStream::wakeFrameSubmission()
 
 void VideoStream::unregisterFrame(uint32_t frameId)
 {
-    d->encodedFrames--;
     std::lock_guard lock(d->pendingFramesMutex);
     d->pendingFrames.remove(frameId);
 }
@@ -1340,20 +1352,15 @@ void VideoStream::performReset(const QRect &desktop, int monitor)
 bool VideoStream::hasInFlightCapacity() const
 {
     std::lock_guard lock(d->pendingFramesMutex);
-    return d->pendingFrames.size() < MaximumInFlightFrames;
+    return d->pendingFrames.size() < d->inFlightLimit.load();
 }
 
 void VideoStream::sendFrame(const VideoFrame &frame)
 {
-    auto peer = d->session->rdpPeer();
-    if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-        if (isVideo(d->activeEncodingMode)) {
-            // The next frames can't be decoded without this one.
-            requestKeyFrame(frame.monitor);
-        }
-        return;
-    }
-
+    // Keep coded packets intact when the socket is congested. FreeRDP's
+    // bounded in-flight window and the encoder's single unsent packet apply
+    // backpressure; dropping a reference frame here corrupts the stream and
+    // provokes repeated, larger key frames.
     if (!d->gfxContext || !d->capsConfirmed) {
         return;
     }
@@ -1368,22 +1375,22 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     // A different desktop size needs a reset of the whole graphics pipeline,
     // otherwise only the surface of this monitor needs to change.
     const QRect desktop = d->desktopRect();
-    bool newSurface = true;
     if (d->pendingReset || desktop != d->desktop) {
         d->pendingReset = false;
         performReset(desktop, frame.monitor);
     } else if (output.surface.size != frame.size || output.surface.id == 0) {
         createSurface(frame.monitor);
-    } else {
-        newSurface = false;
-    }
-
-    if (newSurface && isVideo(d->activeEncodingMode) && !frame.isKeyFrame) {
-        // The client can't decode this frame on a new surface.
-        requestKeyFrame(frame.monitor);
     }
 
     if (!frame.data.isEmpty()) {
+        const auto action = output.surface.gate.submit(frame.isKeyFrame);
+        if (action != VideoFrameGate::Action::Send) {
+            if (action == VideoFrameGate::Action::RequestKeyFrame) {
+                qCDebug(KRDP) << "Waiting for key frame on surface" << output.surface.id << "monitor" << frame.monitor;
+                requestKeyFrame(frame.monitor);
+            }
+            return;
+        }
         // Sent as what it was encoded to, rather than by the encoding mode: a
         // packet taken from the queue just before AV1 fell back to H.264 is
         // still AV1, which the client decodes with the capabilities confirmed.
@@ -1408,11 +1415,9 @@ void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface
 
     auto frameId = d->frameId++;
 
-    d->encodedFrames++;
-
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.insert(frameId);
+        d->pendingFrames.insert(frameId, clk::steady_clock::now());
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu = {};
@@ -1467,6 +1472,13 @@ void VideoStream::sendFrameVideo(const VideoFrame &frame, const Surface &surface
         unregisterFrame(frameId);
     }
 
+    if (status == CHANNEL_RC_OK) {
+        ++d->sentFrames;
+        d->sentBytes += frame.data.size();
+        if (frame.isKeyFrame) {
+            ++d->sentKeyFrames;
+        }
+    }
     d->session->networkDetection()->stopBandwidthMeasure();
 }
 
@@ -1519,11 +1531,9 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
 
     auto frameId = d->frameId++;
 
-    d->encodedFrames++;
-
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.insert(frameId);
+        d->pendingFrames.insert(frameId, clk::steady_clock::now());
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu = {};
@@ -1567,11 +1577,33 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
 void VideoStream::updateRequestedFrameRate()
 {
     auto rtt = std::max(clk::duration_cast<clk::milliseconds>(d->session->networkDetection()->averageRTT()), clk::milliseconds(1));
-    auto now = clk::system_clock::now();
+    const auto acknowledgementTime = std::max(rtt, clk::duration_cast<clk::milliseconds>(clk::microseconds(d->acknowledgementUs.load())));
+    const auto pacing = videoPacing(acknowledgementTime, d->maximumFrameRate);
+    d->inFlightLimit = pacing.inFlightLimit;
+    wakeFrameSubmission();
+    auto now = clk::steady_clock::now();
+    if (now - d->lastStatistics >= clk::seconds(5)) {
+        const double elapsed = clk::duration<double>(now - d->lastStatistics).count();
+        qsizetype pending;
+        qsizetype queued;
+        {
+            std::lock_guard lock(d->pendingFramesMutex);
+            pending = d->pendingFrames.size();
+        }
+        {
+            std::lock_guard lock(d->frameQueueMutex);
+            queued = d->frameQueue.size();
+        }
+        qCInfo(KRDP) << "Video stats: requested FPS" << d->requestedFrameRate.load() << "sent FPS" << d->sentFrames.exchange(0) / elapsed << "ack FPS"
+                     << d->acknowledgedFrames.exchange(0) / elapsed << "Mbit/s" << d->sentBytes.exchange(0) * 8.0 / elapsed / 1000000.0 << "key frames"
+                     << d->sentKeyFrames.exchange(0) << "RTT ms" << rtt.count() << "ack ms" << acknowledgementTime.count() << "pending" << pending << "limit"
+                     << pacing.inFlightLimit << "queued" << queued;
+        d->lastStatistics = now;
+    }
 
     FrameRateEstimate estimate;
     estimate.timeStamp = now;
-    estimate.estimate = std::min(int(clk::milliseconds(1000) / (rtt * std::max(d->frameDelay.load(), 1))), d->maximumFrameRate);
+    estimate.estimate = pacing.frameRate;
     d->frameRateEstimates.append(estimate);
 
     if (now - d->lastFrameRateEstimation < FrameRateEstimateAveragePeriod) {
@@ -1592,11 +1624,8 @@ void VideoStream::updateRequestedFrameRate()
     });
     auto average = qreal(sum) / d->frameRateEstimates.size();
 
-    // we want some headroom so we can always clear our current load
-    // and handle any other latency
-    constexpr qreal targetFrameRateSaturation = 0.5;
-    const int frameRate = std::max(1, qRound(average * targetFrameRateSaturation));
-    const int maximumFrameRate = qRound(d->maximumFrameRate * targetFrameRateSaturation);
+    const int frameRate = std::clamp(qRound(average), 1, d->maximumFrameRate);
+    const int maximumFrameRate = d->maximumFrameRate;
 
     // Every change renegotiates the PipeWire streams, which holds back frames
     // for a moment. Small changes are not worth that, except to get back to

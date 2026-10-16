@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "FrameEncoder.h"
+#include "krdp_logging.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -24,6 +25,10 @@ public:
     void run(std::stop_token token, FrameEncoder *q);
 
     std::atomic<quint8> quality = 75;
+    std::atomic_uint64_t replacedFrames = 0;
+    quint64 encodedFrames = 0;
+    std::chrono::steady_clock::duration encodingTime{};
+    std::chrono::steady_clock::time_point lastStatistics = std::chrono::steady_clock::now();
 
     /**
      * Shared with the tokens of packets, which may outlive the encoder.
@@ -84,6 +89,9 @@ void FrameEncoder::encode(const QImage &image)
 {
     {
         std::lock_guard lock(d->input->mutex);
+        if (d->input->pending) {
+            ++d->replacedFrames;
+        }
         d->input->pending = image;
     }
     d->input->condition.notify_one();
@@ -143,10 +151,22 @@ void FrameEncoder::Private::run(std::stop_token token, FrameEncoder *q)
         }
 
         lastImage = image;
+        const auto encodeStart = std::chrono::steady_clock::now();
         if (!q->encodeImage(image, keyFrame)) {
             q->close();
             Q_EMIT q->failed();
             return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        encodingTime += now - encodeStart;
+        ++encodedFrames;
+        if (now - lastStatistics >= std::chrono::seconds(5)) {
+            qCInfo(KRDP) << "Encoder stats:" << encodedFrames << "frames, mean encode ms"
+                         << std::chrono::duration<double, std::milli>(encodingTime).count() / encodedFrames << "raw frames replaced"
+                         << replacedFrames.exchange(0);
+            lastStatistics = now;
+            encodedFrames = 0;
+            encodingTime = {};
         }
     }
 }
