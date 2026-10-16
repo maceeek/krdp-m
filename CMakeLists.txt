@@ -56,6 +56,7 @@ include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 set(CMAKE_REQUIRED_LIBRARIES freerdp winpr)
 # Checked again on every run, the FreeRDP found may have changed.
+unset(FREERDP_M_FOUND)
 unset(FREERDP_M_FOUND CACHE)
 check_cxx_source_compiles("
 #include <freerdp/codec/av1.h>

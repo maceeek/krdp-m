@@ -64,7 +64,7 @@ public:
 
     uint16_t sequenceNumber = 0;
 
-    uint32_t lastBandwithMeasurement;
+    uint32_t lastBandwithMeasurement = 0;
 
     bool rttEnabled = false;
     clk::system_clock::time_point lastRttUpdate;
@@ -207,7 +207,7 @@ void NetworkDetection::updateAverageRtt()
 
     Q_EMIT rttChanged();
 
-    if (d->lastBandwithMeasurement < 0) {
+    if (d->lastBandwithMeasurement == 0) {
         return;
     }
 

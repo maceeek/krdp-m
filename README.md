@@ -149,6 +149,31 @@ Settings. The log of krdpserver says `Encoding monitor 0 with AV1` when AV1 is
 used. Set `KRDP_DISABLE_AV1=1` in the environment of krdpserver to always use
 H.264, like `KRDP_DISABLE_NVENC` above.
 
+## Frame pacing and diagnostics
+
+A graphics surface waits for a key frame after it is created or reset. Resizing
+only resets the stream once a frame at the new size arrives; repeated layout
+requests do not recreate a decoder unnecessarily. Encoded reference frames are
+kept when the connection is congested, while newer raw frames replace older
+ones before encoding.
+
+The target is 60 FPS. The acknowledgement turnaround controls a bounded window
+of two to six frames, rather than dividing FPS by RTT and the number of pending
+frames. Slow clients still reduce the requested rate and apply backpressure.
+
+AV1 quality mode has a bitrate ceiling of 8 Mbit/s per megapixel, from 4 to
+60 Mbit/s. Set `KRDP_AV1_BITRATE` in the server environment to override it, in
+kbit/s (for example `20000`); `0` explicitly disables the ceiling. NVENC applies
+the ceiling to constant quality, VAAPI uses VBR when a ceiling is requested.
+This bounds encoder bursts; it does not measure or guarantee Wi-Fi capacity.
+
+Every five seconds of activity, `Video stats` reports requested, sent and
+acknowledged FPS, Mbit/s, key frames, RTT, acknowledgement turnaround, pending
+frames and queued packets. `Encoder stats` reports mean encoding time and raw
+frames replaced before encoding. These distinguish source/encoding starvation
+from a slow network or client. Idle or unchanged desktops naturally send fewer
+frames than the requested maximum.
+
 ## Debugging
 
 ```bash

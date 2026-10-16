@@ -39,6 +39,8 @@ const QString MonitorNameBase = u"krdp"_s;
 constexpr int LayoutDebounceMs = 400;
 // Give up converging on a configuration after this many applies.
 constexpr int MaxAttempts = 6;
+// ConfigMonitor may notify before KWin finished propagating mode changes.
+constexpr int ApplySettleMs = 250;
 // Keep sessions that ended alive for at most this long while waiting for
 // the physical outputs to be restored.
 constexpr int ReleaseTimeoutMs = 5000;
@@ -153,8 +155,8 @@ QString VirtualDisplayManager::allocateMonitorName() const
                                                   return display->outputName == outputName;
                                               })
             || std::ranges::any_of(m_releasedSessions, [&outputName](const auto &session) {
-                   return session->virtualOutputName() == outputName;
-               });
+                              return session->virtualOutputName() == outputName;
+                          });
         if (!used) {
             return name;
         }
@@ -362,6 +364,10 @@ void VirtualDisplayManager::reconcile()
         return;
     }
 
+    if (m_lastApply.isValid() && m_lastApply.elapsed() < ApplySettleMs) {
+        scheduleReconcile(ApplySettleMs - m_lastApply.elapsed());
+        return;
+    }
     resolveOutputs();
 
     auto config = m_config->clone();
@@ -404,6 +410,15 @@ void VirtualDisplayManager::reconcile()
 
     if (++m_attempts > MaxAttempts) {
         qCWarning(KRDP_DISPLAYS) << "Giving up applying the output configuration after" << MaxAttempts << "attempts";
+        for (const auto &display : m_displays) {
+            const auto output = m_config->output(display->outputId);
+            if (output) {
+                const auto mode = output->currentMode();
+                qCWarning(KRDP_DISPLAYS) << "Output did not converge:" << output->name() << "requested" << display->size << "scale" << display->scale
+                                         << "actual" << (mode ? mode->size() : QSize()) << "scale" << output->scale() << "enabled" << output->isEnabled()
+                                         << "position" << output->pos();
+            }
+        }
         // Do not stay exclusive when the physical outputs are on anyway, that
         // keeps the detection of someone at the computer armed and every
         // movement of the mouse would try again.
@@ -716,7 +731,7 @@ void VirtualDisplayManager::apply(const KScreen::ConfigPtr &config)
         }
         // The config monitor updates m_config shortly after, check again
         // once that happened.
-        scheduleReconcile(250);
+        scheduleReconcile(ApplySettleMs);
     });
 }
 
