@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+
+#include <libxcvt/libxcvt.h>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -140,8 +143,23 @@ QSize VirtualDisplayManager::sanitizeSize(const QSize &size) const
 {
     // Limits from [MS-RDPEDISP], the encoder needs even dimensions.
     const int width = std::clamp(size.width(), 200, std::min(m_maximumSize.width(), 8192));
-    const int height = std::clamp(size.height(), 200, std::min(m_maximumSize.height(), 8192));
-    return QSize(width & ~1, height & ~1);
+    const int height = std::clamp(size.height(), 200, std::min(m_maximumSize.height(), 8192)) & ~1;
+
+    // Match KWin's CVT generation before creating the monitor or advertising
+    // its layout. Usually this rounds the width down to multiples of 8, but
+    // CVT has exceptions such as 1366x768. If it rounds up, try a smaller
+    // width so neither the request nor our configured limit is exceeded.
+    for (int candidateWidth = width; candidateWidth >= 200; candidateWidth -= 8) {
+        const std::unique_ptr<libxcvt_mode_info, decltype(&std::free)> mode(libxcvt_gen_mode_info(candidateWidth, height, RefreshRate, false, false),
+                                                                            &std::free);
+        if (!mode) {
+            break;
+        }
+        if (mode->hdisplay <= uint32_t(width) && mode->vdisplay <= uint32_t(height)) {
+            return QSize(mode->hdisplay, mode->vdisplay);
+        }
+    }
+    return QSize(width & ~7, height);
 }
 
 QString VirtualDisplayManager::allocateMonitorName() const

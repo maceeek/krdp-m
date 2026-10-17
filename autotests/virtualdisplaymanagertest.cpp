@@ -5,6 +5,9 @@
 #include <QStandardPaths>
 #include <QTest>
 
+#include <cstdlib>
+#include <libxcvt/libxcvt.h>
+
 #include <KConfigGroup>
 #include <KSharedConfig>
 
@@ -86,12 +89,15 @@ private Q_SLOTS:
     void testExclusive();
     void testExtend();
     void testResize();
+    void testCustomResize_data();
+    void testCustomResize();
     void testLocalTakeover();
     void testMonitorEnabledExternally();
     void testRestoreAfterCrash();
     void testRestoreUnusableLayout();
     void testReturnAfterDisconnect();
     void testSanitizeSize();
+    void testSanitizedSizesMatchCvt();
     void testMonitorNames();
     void testMultipleMonitors_data();
     void testMultipleMonitors();
@@ -193,7 +199,7 @@ void VirtualDisplayManagerTest::testResize()
     QTRY_COMPARE(currentSize(output(currentConfig(), u"Virtual-krdp"_s)), QSize(1920, 1080));
 
     // Otherwise a custom mode gets added, which KWin turns into a real mode.
-    // Odd sizes are rounded down, as the encoder needs even sizes.
+    // Widths are rounded down for CVT, heights for the encoder.
     manager.requestLayout(session.get(), QSize(1601, 901), 1.5);
     QTRY_VERIFY(!output(currentConfig(), u"Virtual-krdp"_s)->customModes().isEmpty());
     auto virtualOutput = output(currentConfig(), u"Virtual-krdp"_s);
@@ -204,6 +210,76 @@ void VirtualDisplayManagerTest::testResize()
     // Resizing must not give the physical outputs back.
     QVERIFY(manager.isExclusive());
     QVERIFY(!output(currentConfig(), u"eDP-1"_s)->isEnabled());
+}
+
+void VirtualDisplayManagerTest::testCustomResize_data()
+{
+    QTest::addColumn<VirtualDisplayManager::Mode>("mode");
+    QTest::addColumn<QSize>("requested");
+    QTest::addColumn<QSize>("expected");
+
+    QTest::newRow("exclusive-1650") << VirtualDisplayManager::Mode::Exclusive << QSize(1650, 1064) << QSize(1648, 1064);
+    QTest::newRow("extend-1650") << VirtualDisplayManager::Mode::Extend << QSize(1650, 1064) << QSize(1648, 1064);
+    QTest::newRow("exclusive-1366") << VirtualDisplayManager::Mode::Exclusive << QSize(1366, 768) << QSize(1366, 768);
+    QTest::newRow("cvt-rounds-up") << VirtualDisplayManager::Mode::Exclusive << QSize(1360, 768) << QSize(1352, 768);
+    QTest::newRow("odd-dimensions") << VirtualDisplayManager::Mode::Exclusive << QSize(1651, 1065) << QSize(1648, 1064);
+}
+
+void VirtualDisplayManagerTest::testCustomResize()
+{
+    QFETCH(VirtualDisplayManager::Mode, mode);
+    QFETCH(QSize, requested);
+    QFETCH(QSize, expected);
+
+    VirtualDisplayManager manager;
+    manager.setMode(mode);
+    auto session = std::make_unique<FakeSession>(u"Virtual-krdp"_s);
+    manager.addSession(session.get(), QSize(1280, 720), 1.0);
+    QTRY_COMPARE(output(currentConfig(), u"Virtual-krdp"_s)->pos(), mode == VirtualDisplayManager::Mode::Exclusive ? QPoint() : QPoint(4480, 0));
+
+    // Add a custom mode, switch to fullscreen, then return to the window.
+    const QList<QSize> requests{requested, QSize(1920, 1200), requested};
+    const QList<QSize> expectedSizes{expected, QSize(1920, 1200), expected};
+    for (int i = 0; i < requests.size(); ++i) {
+        manager.requestLayout(session.get(), requests[i], 1.0);
+        QTRY_VERIFY(currentSize(output(currentConfig(), u"Virtual-krdp"_s)) == expectedSizes[i]
+                    || (!output(currentConfig(), u"Virtual-krdp"_s)->customModes().isEmpty()
+                        && output(currentConfig(), u"Virtual-krdp"_s)->customModes().first().size.height() == expectedSizes[i].height()));
+
+        // The Fake backend only stores the request. Model KWin's publication
+        // of a generated mode using the same CVT generator as KWin. Its
+        // size and refresh rate may differ from the request. The old
+        // mode stays active until the manager selects the new one.
+        if (currentSize(output(currentConfig(), u"Virtual-krdp"_s)) != expectedSizes[i]) {
+            auto config = currentConfig()->clone();
+            auto virtualOutput = output(config, u"Virtual-krdp"_s);
+            auto info = virtualOutput->customModes().first();
+            const std::unique_ptr<libxcvt_mode_info, decltype(&std::free)> cvt(
+                libxcvt_gen_mode_info(info.size.width(), info.size.height(), info.refreshRate, false, false),
+                &std::free);
+            QVERIFY(cvt);
+            info.size = QSize(cvt->hdisplay, cvt->vdisplay);
+            info.refreshRate = cvt->vrefresh;
+            virtualOutput->setCustomModes({info});
+            KScreen::ModePtr generated(new KScreen::Mode);
+            generated->setId(QString::number(100 + i));
+            generated->setSize(info.size);
+            generated->setRefreshRate(info.refreshRate);
+            auto modes = virtualOutput->modes();
+            modes.insert(generated->id(), generated);
+            virtualOutput->setModes(modes);
+            // Publish the backend's newly available modes before validating
+            // configurations which select one of them.
+            KScreen::BackendManager::instance()->setConfig(config);
+            auto operation = new KScreen::SetConfigOperation(config);
+            QVERIFY(operation->exec());
+        }
+
+        QTRY_COMPARE_WITH_TIMEOUT(currentSize(output(currentConfig(), u"Virtual-krdp"_s)), expectedSizes[i], 3000);
+        QCOMPARE(manager.isExclusive(), mode == VirtualDisplayManager::Mode::Exclusive);
+        QCOMPARE(output(currentConfig(), u"eDP-1"_s)->isEnabled(), mode != VirtualDisplayManager::Mode::Exclusive);
+        QCOMPARE(output(currentConfig(), u"HDMI-A-1"_s)->isEnabled(), mode != VirtualDisplayManager::Mode::Exclusive);
+    }
 }
 
 void VirtualDisplayManagerTest::testLocalTakeover()
@@ -353,11 +429,38 @@ void VirtualDisplayManagerTest::testSanitizeSize()
 {
     VirtualDisplayManager manager;
     QCOMPARE(manager.sanitizeSize(QSize(1920, 1080)), QSize(1920, 1080));
-    QCOMPARE(manager.sanitizeSize(QSize(1366, 767)), QSize(1366, 766));
+    QCOMPARE(manager.sanitizeSize(QSize(1366, 767)), QSize(1360, 766));
+    QCOMPARE(manager.sanitizeSize(QSize(1650, 1064)), QSize(1648, 1064));
+    QCOMPARE(manager.sanitizeSize(QSize(1366, 768)), QSize(1366, 768));
+    QCOMPARE(manager.sanitizeSize(QSize(1360, 768)), QSize(1352, 768));
     QCOMPARE(manager.sanitizeSize(QSize(100, 50)), QSize(200, 200));
     QCOMPARE(manager.sanitizeSize(QSize(7680, 4320)), QSize(4096, 4096));
     manager.setMaximumSize(QSize(2560, 1440));
     QCOMPARE(manager.sanitizeSize(QSize(3840, 2160)), QSize(2560, 1440));
+    manager.setMaximumSize(QSize(1655, 1065));
+    QCOMPARE(manager.sanitizeSize(QSize(1920, 1200)), QSize(1648, 1064));
+    manager.setMaximumSize(QSize(1360, 768));
+    QCOMPARE(manager.sanitizeSize(QSize(1920, 1080)), QSize(1352, 768));
+}
+
+void VirtualDisplayManagerTest::testSanitizedSizesMatchCvt()
+{
+    VirtualDisplayManager manager;
+    manager.setMaximumSize(QSize(8192, 8192));
+    for (int width = 200; width <= 8192; width += 2) {
+        for (int height : {200, 768, 1064, 1200, 2160, 8192}) {
+            const auto size = manager.sanitizeSize(QSize(width, height));
+            const std::unique_ptr<libxcvt_mode_info, decltype(&std::free)> cvt(libxcvt_gen_mode_info(size.width(), size.height(), 60.0f, false, false),
+                                                                               &std::free);
+            QVERIFY(cvt);
+            QCOMPARE(QSize(cvt->hdisplay, cvt->vdisplay), size);
+            QVERIFY(size.width() >= 200 && size.width() <= width);
+            QVERIFY(size.height() >= 200 && size.height() <= height);
+            QCOMPARE(size.width() % 2, 0);
+            QCOMPARE(size.height() % 2, 0);
+            QCOMPARE(manager.sanitizeSize(size), size);
+        }
+    }
 }
 
 void VirtualDisplayManagerTest::testMonitorNames()
