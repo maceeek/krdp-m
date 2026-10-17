@@ -10,7 +10,7 @@ find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Test)
 
 add_executable(virtualdisplaymanagertest virtualdisplaymanagertest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualDisplayManager.cpp)
 target_include_directories(virtualdisplaymanagertest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(virtualdisplaymanagertest PRIVATE Qt6::Test KRdp KF6::Screen KF6::ConfigCore)
+target_link_libraries(virtualdisplaymanagertest PRIVATE Qt6::Test KRdp KF6::Screen KF6::ConfigCore PkgConfig::Libxcvt)
 add_test(NAME virtualdisplaymanagertest COMMAND virtualdisplaymanagertest)
 
 add_executable(monitorlayouttest monitorlayouttest.cpp)

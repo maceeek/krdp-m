@@ -33,6 +33,7 @@ depends=(ffmpeg
          kpipewire
          kstatusnotifieritem
          libkscreen
+         libxcvt
          libxkbcommon
          pam
          qt6-base

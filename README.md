@@ -20,6 +20,9 @@ can get its own virtual monitor that matches the client:
   client window is resized or goes fullscreen. Use `/dynamic-resolution` with
   FreeRDP, Remmina's "Dynamic resolution update" or the default behaviour of
   the Windows Remote Desktop client. Windows stay where they are when resizing.
+- Sizes are adjusted to KWin's generated CVT display modes and even dimensions
+  for video encoding, within the requested size and configured limits. For
+  example, 1650x1064 becomes 1648x1064; 1366x768 stays unchanged.
 
 How remote sessions use the displays is configured in System Settings ›
 Remote Desktop › Displays, with `VirtualDisplayMode` in the `[VirtualDisplay]`
