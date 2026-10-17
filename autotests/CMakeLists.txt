@@ -38,3 +38,10 @@ add_executable(videopacingtest videopacingtest.cpp)
 target_include_directories(videopacingtest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(videopacingtest PRIVATE Qt6::Test)
 add_test(NAME videopacingtest COMMAND videopacingtest)
+
+add_executable(videostreamsizetest videostreamsizetest.cpp)
+target_link_libraries(videostreamsizetest PRIVATE Qt6::Test KRdp)
+# The test intercepts KPipeWire's size setters to verify negotiation requests
+# without connecting to the user's PipeWire daemon or requiring a GPU.
+set_target_properties(videostreamsizetest PROPERTIES ENABLE_EXPORTS ON)
+add_test(NAME videostreamsizetest COMMAND videostreamsizetest)

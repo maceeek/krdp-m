@@ -207,6 +207,8 @@ public:
         quint32 nodeId = 0;
         int pipeWireFd = -1;
         QSize size;
+        // Desired PipeWire format, retained across codec changes and restarts.
+        QSize requestedSize;
         // Set when the source changed size and the encoder needs to be
         // restarted, packets from the old encoder are dropped until then.
         bool encoderRestartPending = false;
@@ -458,6 +460,9 @@ void VideoStream::createStream(int monitor)
         stream.encodedStream->setQuality(d->quality);
         stream.encodedStream->setMaxFramerate(d->requestedFrameRate, 1);
         stream.encodedStream->setMaxPendingFrames(d->requestedFrameRate);
+        if (stream.requestedSize.isValid()) {
+            stream.encodedStream->setRequestedSize(stream.requestedSize);
+        }
 
         connect(stream.encodedStream.get(), &PipeWireEncodedStream::newPacket, this, [this, monitor](const PipeWireEncodedStream::Packet &packet) {
             onPacketReceived(monitor, packet);
@@ -556,6 +561,9 @@ void VideoStream::createStream(int monitor)
         stream.sourceStream->setAllowDmaBuf(false);
         stream.sourceStream->setDamageEnabled(true);
         stream.sourceStream->setMaxFramerate({static_cast<quint32>(d->requestedFrameRate.load()), 1});
+        if (stream.requestedSize.isValid()) {
+            stream.sourceStream->setRequestedSize(stream.requestedSize);
+        }
         // Handled right away, while PipeWire does not use the buffer of the
         // frame: once it is given back the compositor may draw the next frame
         // into it, and it saves a pass through the event loop.
@@ -588,6 +596,7 @@ void VideoStream::setStreamSize(int monitor, const QSize &size)
         return;
     }
 
+    qCInfo(KRDP) << "PipeWire stream size for monitor" << monitor << "changed from" << stream.size << "to" << size;
     stream.size = size;
     Q_EMIT monitorSizeChanged(monitor, size);
     if (monitor == 0) {
@@ -670,6 +679,24 @@ void VideoStream::setMonitorLayout(const MonitorLayout &layout)
         d->frameQueue.removeIf([count](const VideoFrame &frame) {
             return frame.monitor >= int(count);
         });
+    }
+
+    // KWin's virtual outputs follow the size negotiated by the PipeWire
+    // consumer. Changing only the output mode leaves the capture buffers at
+    // the old size, so a larger desktop is cropped to the previous viewport.
+    for (std::size_t i = 0; i < count; ++i) {
+        const QSize size = i < std::size_t(layout.size()) ? layout[i].rect.size() : QSize();
+        auto &stream = *d->streams[i];
+        if (stream.requestedSize == size) {
+            continue;
+        }
+        stream.requestedSize = size;
+        if (stream.sourceStream) {
+            stream.sourceStream->setRequestedSize(size);
+        }
+        if (stream.encodedStream) {
+            stream.encodedStream->setRequestedSize(size);
+        }
     }
 
     std::lock_guard lock(d->outputsMutex);

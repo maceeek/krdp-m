@@ -20,7 +20,7 @@ jobs:
             base-devel git cmake ninja extra-cmake-modules plasma-wayland-protocols \
             kcmutils kconfig kcoreaddons kcrash kdbusaddons kguiaddons ki18n \
             kidletime kirigami kirigami-addons kpipewire kstatusnotifieritem libkscreen \
-            libxkbcommon pam qt6-base qt6-declarative qt6-wayland qtkeychain-qt6 systemd-libs
+            libxcvt libxkbcommon pam qt6-base qt6-declarative qt6-wayland qtkeychain-qt6 systemd-libs
 
       # KRdp-M needs FreeRDP-M, which replaces the freerdp package of Arch Linux.
       # Build it with its PKGBUILD, makepkg does not run as root.
