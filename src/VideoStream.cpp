@@ -1582,7 +1582,9 @@ void VideoStream::sendFrameProgressive(const VideoFrame &frame, const Surface &s
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.insert(frameId, clk::steady_clock::now());
+        if (!d->frameAcknowledgementSuspended) {
+            d->pendingFrames.insert(frameId, clk::steady_clock::now());
+        }
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu = {};
