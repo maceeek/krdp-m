@@ -11,6 +11,9 @@ ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdpserver
 # Turn the physical monitors back on if krdpserver turned them off and did
 # not get to restore them itself. KWin does this as well, this is a fallback.
 ExecStopPost=-@CMAKE_INSTALL_PREFIX@/bin/krdpserver --restore-displays
+# Detach the file system of redirected drives if krdpserver did not get to
+# unmount it itself, so that programs do not hang on it.
+ExecStopPost=-/bin/sh -c 'findmnt -t fuse.krdp "$1" > /dev/null && fusermount3 -u -q -z "$1"' sh %h/thinclient_drives
 Restart=on-abnormal
 
 [Install]
