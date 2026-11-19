@@ -17,6 +17,7 @@
 #include <QHostAddress>
 #include <QStandardPaths>
 #include <QTcpSocket>
+#include <QTemporaryFile>
 #include <QThread>
 
 #include <freerdp/channels/wtsvc.h>
@@ -24,10 +25,12 @@
 #include <freerdp/server/cliprdr.h>
 
 #include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/rdpdr.h>
 
 #include "Clipboard.h"
 #include "Cursor.h"
 #include "DisplayControl.h"
+#include "DriveRedirection.h"
 #include "InputHandler.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
@@ -42,6 +45,52 @@ namespace fs = std::filesystem;
 
 namespace KRdp
 {
+
+/**
+ * Create the "sam" file used by FreeRDP for reading username and password
+ * information. It hashes the password in the appropriate format and writes that
+ * along with the username to the provided temporary file.
+ */
+static bool createSamFile(QTemporaryFile &file, const QList<User> &users)
+{
+    auto runtimePath = fs::path(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation).toStdString());
+
+    auto path = runtimePath / "krdp";
+    fs::create_directories(path);
+
+    file.setFileTemplate(QString::fromStdString(path / "rdp-sam-XXXXXX"));
+    if (!file.open()) {
+        qCWarning(KRDP) << "Could not open SAM file";
+        return false;
+    }
+
+    QString data;
+
+    for (const auto &user : users) {
+        // Users without a password can't log in, see onPostConnect().
+        if (user.password.isEmpty()) {
+            continue;
+        }
+
+        auto username = user.name.section(QLatin1Char('\\'), -1);
+        auto password = user.password.toUtf8();
+
+        std::array<uint8_t, 16> hash;
+        NTOWFv1A((LPSTR)password.data(), password.size(), hash.data());
+
+        auto entry = QStringLiteral("%1:::").arg(username);
+        for (int i = 0; i < 16; ++i) {
+            entry.append(QStringLiteral("%1").arg(hash[i], 2, 16, QLatin1Char('0')));
+        }
+        entry.append(QStringLiteral(":::\n"));
+        data.append(entry);
+    }
+
+    file.write(data.toUtf8());
+    file.close();
+
+    return true;
+}
 
 #include <security/pam_appl.h>
 
@@ -150,7 +199,7 @@ static int pamAuthenticate(const QString &user, const QString &password)
  */
 BOOL peerCapabilities(freerdp_peer *peer)
 {
-    auto context = reinterpret_cast<PeerContext *>(peer->context);
+    auto context = contextForPeer(peer);
     if (context->connection->onCapabilities()) {
         return TRUE;
     }
@@ -163,7 +212,7 @@ BOOL peerCapabilities(freerdp_peer *peer)
  */
 BOOL peerPostConnect(freerdp_peer *peer)
 {
-    auto context = reinterpret_cast<PeerContext *>(peer->context);
+    auto context = contextForPeer(peer);
     if (context->connection->onPostConnect()) {
         return TRUE;
     }
@@ -209,6 +258,7 @@ public:
     std::unique_ptr<NetworkDetection> networkDetection;
     std::unique_ptr<Clipboard> clipboard;
     std::unique_ptr<DisplayControl> displayControl;
+    std::unique_ptr<DriveRedirection> driveRedirection;
 
     // Monitors the client asked for when connecting.
     // Written from the connection thread, read from the main thread.
@@ -218,6 +268,23 @@ public:
     freerdp_peer *peer = nullptr;
 
     std::jthread thread;
+
+    // Manual-reset event the run thread waits on alongside the peer transport
+    // handles. Signalling it wakes the thread for teardown without any protocol
+    // I/O on the peer from the calling thread.
+    HANDLE stopEvent = nullptr;
+
+    // Ask the run thread to finish, from any thread. It owns the peer and closes
+    // it as it exits, so callers never touch the peer themselves.
+    void requestStop()
+    {
+        thread.request_stop();
+        if (stopEvent) {
+            SetEvent(stopEvent);
+        }
+    }
+
+    QTemporaryFile samFile;
 };
 
 RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
@@ -232,30 +299,31 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     connect(d->videoStream.get(), &VideoStream::closed, this, [this]() {
         if (d->state == State::Running || d->state == State::Streaming) {
             qCDebug(KRDP) << "Video stream closed, closing session";
-            d->peer->Close(d->peer);
+            d->requestStop();
         }
     });
     d->cursor = std::make_unique<Cursor>(this);
     d->networkDetection = std::make_unique<NetworkDetection>(this);
     d->clipboard = std::make_unique<Clipboard>(this);
     d->displayControl = std::make_unique<DisplayControl>(this);
+    d->driveRedirection = std::make_unique<DriveRedirection>(this);
 
     QMetaObject::invokeMethod(this, &RdpConnection::initialize, Qt::QueuedConnection);
 }
 
 RdpConnection::~RdpConnection()
 {
-    // Close the peer first to unblock WaitForMultipleObjects in the
-    // run thread. Without this, thread.join() can deadlock when the
-    // session is not in the Streaming state but the thread is still
-    // blocked waiting for socket events.
-    if (d->peer) {
-        d->peer->Close(d->peer);
-    }
-
+    // The run thread owns the peer transport and closes it as it exits, so just
+    // wake it (stopEvent) and join before we free. Closing the peer here, while
+    // the run thread still reads the same transport, races inside FreeRDP and
+    // crashes on shutdown.
     if (d->thread.joinable()) {
-        d->thread.request_stop();
+        d->requestStop();
         d->thread.join();
+    } else if (d->peer && d->state != State::Closed) {
+        // The run thread was never started (peer set up but initialize failed):
+        // nothing else touches the peer, so close it here before freeing.
+        d->peer->Close(d->peer);
     }
 
     if (d->peer) {
@@ -263,6 +331,10 @@ RdpConnection::~RdpConnection()
         // freerdp_peer_context_new_ex().
         freerdp_peer_context_free(d->peer);
         freerdp_peer_free(d->peer);
+    }
+
+    if (d->stopEvent) {
+        CloseHandle(d->stopEvent);
     }
 }
 
@@ -283,6 +355,10 @@ void RdpConnection::setState(KRdp::RdpConnection::State newState)
 
 void RdpConnection::close(RdpConnection::CloseReason reason)
 {
+    if (d->state == State::Closed) {
+        return;
+    }
+
     switch (reason) {
     case CloseReason::VideoInitFailed:
         freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
@@ -291,9 +367,11 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
         break;
     }
 
-    if (d->peer) { // may be null if creating the peer failed
-        d->peer->Close(d->peer);
-    }
+    // Hand teardown to the run thread; it owns the peer transport and closes it
+    // as it exits. This is called from the main thread (SessionController) and
+    // from video-encoding threads (VideoStream), so it must not drive the peer
+    // directly - that would race with the run thread reading the same transport.
+    d->requestStop();
 }
 
 InputHandler *RdpConnection::inputHandler() const
@@ -309,6 +387,11 @@ KRdp::VideoStream *RdpConnection::videoStream() const
 DisplayControl *RdpConnection::displayControl() const
 {
     return d->displayControl.get();
+}
+
+DriveRedirection *RdpConnection::driveRedirection() const
+{
+    return d->driveRedirection.get();
 }
 
 MonitorLayout RdpConnection::clientMonitorLayout() const
@@ -395,6 +478,19 @@ void RdpConnection::initialize()
 
     auto settings = d->peer->context->settings;
 
+    const bool usePamAuthentication = d->server->usePAMAuthentication();
+
+    if (!usePamAuthentication) {
+        if (!createSamFile(d->samFile, d->server->users())) {
+            return;
+        }
+
+        if (!freerdp_settings_set_string(settings, FreeRDP_NtlmSamFile, d->samFile.fileName().toUtf8().constData())) {
+            qCWarning(KRDP) << "Failed to set SAM database";
+            return;
+        }
+    }
+
     auto certificate = freerdp_certificate_new_from_file(d->server->tlsCertificate().string().data());
     if (!certificate) {
         qCWarning(KRDP) << "Could not read certificate file" << d->server->tlsCertificate().string();
@@ -410,8 +506,11 @@ void RdpConnection::initialize()
     freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1);
 
     freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, false);
-    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, true);
-    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, false);
+    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, usePamAuthentication);
+    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, !usePamAuthentication);
+    freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, false);
+    // We do not implement RDSTLS, don't rely on FreeRDP's default for it
+    freerdp_settings_set_bool(settings, FreeRDP_RdstlsSecurity, false);
 
     freerdp_settings_set_uint32(settings, FreeRDP_OsMajorType, OSMAJORTYPE_UNIX);
     // PSEUDO_XSERVER is apparently required for things to work properly.
@@ -466,6 +565,10 @@ void RdpConnection::initialize()
 
     qCDebug(KRDP) << "Session setup completed, start processing...";
 
+    // Manual-reset event the run thread waits on, so teardown can wake it
+    // without protocol I/O on the peer. Created before the thread starts.
+    d->stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
     // Perform actual communication on a separate thread.
     d->thread = std::jthread(std::bind(&RdpConnection::run, this, std::placeholders::_1));
     pthread_setname_np(d->thread.native_handle(), "krdp_session");
@@ -480,14 +583,22 @@ void RdpConnection::run(std::stop_token stopToken)
     setState(State::Running);
 
     while (!stopToken.stop_requested()) {
-        std::array<HANDLE, 32> events{channelEvent};
-        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 1, 31);
+        // events[0] = virtual channel manager, events[1] = stopEvent (signalled
+        // for teardown), the rest = peer transport handles.
+        std::array<HANDLE, 33> events{channelEvent, d->stopEvent};
+        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 2, 31);
         if (handleCount <= 0) {
             qCDebug(KRDP) << "Unable to get transport event handles";
             break;
         }
         // Wait for something to happen on the connection.
-        WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, INFINITE);
+        WaitForMultipleObjects(2 + handleCount, events.data(), FALSE, INFINITE);
+
+        // Bail out before touching the peer transport if we were asked to stop,
+        // so teardown stays race-free.
+        if (stopToken.stop_requested()) {
+            break;
+        }
 
         // Read data from the socket and have FreeRDP process it.
         if (d->peer->CheckFileDescriptor(d->peer) != TRUE) {
@@ -525,6 +636,12 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
+        if (d->peer->connected && d->state == State::Activated && d->server->driveRedirectionEnabled()
+            && WTSVirtualChannelManagerIsChannelJoined(context->virtualChannelManager, RDPDR_SVC_CHANNEL_NAME)) {
+            // Not fatal, without it the client just can't share its folders.
+            d->driveRedirection->initialize();
+        }
+
         if (drdynvcJoined != lastDrdynvcJoined || drdynvcState != lastDrdynvcState) {
             lastDrdynvcJoined = drdynvcJoined;
             lastDrdynvcState = drdynvcState;
@@ -547,6 +664,14 @@ void RdpConnection::run(std::stop_token stopToken)
     }
 
     qCDebug(KRDP) << "Closing session";
+
+    // Close the peer here, on the thread that owns it. Every other close path
+    // just asks this thread to stop, so once a run thread exists this is the
+    // only place the transport is driven - keeping teardown single-threaded.
+    if (d->peer) {
+        d->peer->Close(d->peer);
+    }
+
     onClose();
 }
 
@@ -598,39 +723,48 @@ bool RdpConnection::onPostConnect()
     qCInfo(KRDP) << "New client connected:" << d->peer->hostname << freerdp_peer_os_major_type_string(d->peer) << freerdp_peer_os_minor_type_string(d->peer);
 
     rdpSettings *settings = d->peer->context->settings;
-
-    if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
-        return false;
-    }
-
-    const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username));
-    const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
+    const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username)).section(QLatin1Char('\\'), -1);
 
     if (d->server->usePAMAuthentication()) {
-        qCDebug(KRDP) << "Attempting authenticating user with PAM";
-        if (username == KUser().loginName() && pamAuthenticate(username, password) >= 0) {
-            qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
-            return true;
-        }
-    }
-
-    const auto users = d->server->users();
-    for (auto user : users) {
-        if (user.password.isEmpty()) {
+        if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
             return false;
         }
-        if (user.name == username && user.password == password) {
-            qCDebug(KRDP) << "User" << username << "authenticated successfully";
-            return true;
-        }
-    }
 
-    return false;
+        const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
+        qCDebug(KRDP) << "Attempting authenticating user with PAM";
+        if (username == KUser().loginName() || KUser().loginName() == QStringLiteral("plasmalogin")) {
+            if (pamAuthenticate(username, password) >= 0) {
+                qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
+                return true;
+            }
+        }
+        const auto users = d->server->users();
+        for (auto user : users) {
+            if (user.password.isEmpty()) {
+                continue;
+            }
+            if (user.name == username && user.password == password) {
+                qCDebug(KRDP) << "User" << username << "authenticated successfully";
+                return true;
+            }
+        }
+        return false;
+    } else {
+        // In the NLA case the user has been authorised against the SAM database.
+        // FreeRDP only leaves the security protocol enabled that was negotiated,
+        // make sure that the client did not get here without NLA.
+        if (!freerdp_settings_get_bool(settings, FreeRDP_NlaSecurity) && !freerdp_settings_get_bool(settings, FreeRDP_ExtSecurity)) {
+            qCWarning(KRDP) << "Rejecting a client that was not authenticated with NLA";
+            return false;
+        }
+        return true;
+    }
 }
 
 bool RdpConnection::onClose()
 {
     d->clipboard->close();
+    d->driveRedirection->close();
     d->displayControl->close();
     d->videoStream->close();
     setState(State::Closed);

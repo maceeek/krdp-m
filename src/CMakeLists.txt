@@ -35,6 +35,12 @@ target_sources(KRdp PRIVATE
     MonitorLayout.h
     DisplayControl.cpp
     DisplayControl.h
+    DriveFilesystem.cpp
+    DriveFilesystem.h
+    DriveRedirection.cpp
+    DriveRedirection.h
+    DriveUtils.cpp
+    DriveUtils.h
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
@@ -92,7 +98,7 @@ target_link_libraries(KRdp PUBLIC
     XKB::XKB
 )
 
-target_link_libraries(KRdp PRIVATE PkgConfig::FFmpeg)
+target_link_libraries(KRdp PRIVATE PkgConfig::FFmpeg PkgConfig::Fuse3)
 
 set_target_properties(KRdp PROPERTIES
     VERSION ${PROJECT_VERSION}

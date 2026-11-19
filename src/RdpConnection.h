@@ -26,6 +26,7 @@ class Cursor;
 class NetworkDetection;
 class Clipboard;
 class DisplayControl;
+class DriveRedirection;
 
 /**
  * An RDP session.
@@ -108,6 +109,12 @@ public:
     DisplayControl *displayControl() const;
 
     /**
+     * The drive redirection channel, used by the client to share folders
+     * with the session.
+     */
+    DriveRedirection *driveRedirection() const;
+
+    /**
      * The monitors of the client when it connected, normalized.
      *
      * Clients that do not send their monitors get a single monitor of the
@@ -129,6 +136,7 @@ private:
     friend class NetworkDetection;
     friend class Clipboard;
     friend class DisplayControl;
+    friend class DriveRedirection;
 
     void setState(State newState);
     void initialize();

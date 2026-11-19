@@ -29,6 +29,9 @@ constexpr auto rttUpdateInterval = clk::milliseconds(70);
 constexpr auto rttAverageInterval = clk::milliseconds(500);
 constexpr auto networkResultInterval = clk::seconds(1);
 
+constexpr auto bandwidthMeasureDuration = clk::milliseconds(500);
+constexpr auto bandwidthMeasureInterval = clk::seconds(2);
+
 BOOL rttMeasureResponse(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t sequence)
 {
     auto context = reinterpret_cast<PeerContext *>(rdpAutodetect->context);
@@ -38,10 +41,10 @@ BOOL rttMeasureResponse(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16
     return FALSE;
 }
 
-BOOL bwMeasureResults(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t, uint16_t, uint32_t, uint32_t)
+BOOL bwMeasureResults(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t, uint16_t, uint32_t timeDelta, uint32_t byteCount)
 {
     auto context = reinterpret_cast<PeerContext *>(rdpAutodetect->context);
-    if (context->networkDetection->onBandwidthMeasureResults()) {
+    if (context->networkDetection->onBandwidthMeasureResults(timeDelta, byteCount)) {
         return TRUE;
     }
     return FALSE;
@@ -75,6 +78,9 @@ public:
     clk::system_clock::duration averageRtt;
 
     clk::system_clock::time_point lastNetworkResult;
+
+    clk::system_clock::time_point bandwidthMeasureStartTime;
+    clk::system_clock::time_point lastBandwidthMeasureStart;
 };
 
 NetworkDetection::NetworkDetection(RdpConnection *session)
@@ -110,6 +116,7 @@ void NetworkDetection::startBandwidthMeasure()
     }
 
     d->state = State::PendingStop;
+    d->bandwidthMeasureStartTime = clk::system_clock::now();
     d->rdpAutodetect->BandwidthMeasureStart(d->rdpAutodetect, RDP_TRANSPORT_TCP, 0);
 }
 
@@ -130,6 +137,14 @@ void NetworkDetection::update()
     }
 
     auto now = clk::system_clock::now();
+
+    if (d->state == State::PendingStop && (now - d->bandwidthMeasureStartTime) >= bandwidthMeasureDuration) {
+        stopBandwidthMeasure();
+    } else if (d->state == State::None && (now - d->lastBandwidthMeasureStart) >= bandwidthMeasureInterval) {
+        d->lastBandwidthMeasureStart = now;
+        startBandwidthMeasure();
+    }
+
     if ((now - d->lastRttUpdate) < rttUpdateInterval) {
         return;
     }
@@ -165,7 +180,7 @@ bool NetworkDetection::onRttMeasureResponse(uint16_t sequence)
     return true;
 }
 
-bool NetworkDetection::onBandwidthMeasureResults()
+bool NetworkDetection::onBandwidthMeasureResults(uint32_t timeDelta, uint32_t byteCount)
 {
     if (d->state != State::PendingResults) {
         return true;
@@ -173,11 +188,11 @@ bool NetworkDetection::onBandwidthMeasureResults()
 
     d->state = State::None;
 
-    if (d->rdpAutodetect->netCharBandwidth <= 0) {
+    if (timeDelta == 0 || byteCount == 0) {
         return true;
     }
 
-    d->lastBandwithMeasurement = d->rdpAutodetect->netCharBandwidth;
+    d->lastBandwithMeasurement = static_cast<uint32_t>((static_cast<uint64_t>(byteCount) * 1000ULL) / static_cast<uint64_t>(timeDelta));
 
     updateAverageRtt();
 

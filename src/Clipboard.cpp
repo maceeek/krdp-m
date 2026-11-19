@@ -30,6 +30,7 @@ public:
 
     Clipboard *q;
 
+    uint32_t onClientCapabilities(const CLIPRDR_CAPABILITIES *capabilities);
     uint32_t onClientFormatList(const CLIPRDR_FORMAT_LIST *formatList);
     uint32_t onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse);
     uint32_t onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA_REQUEST *formatDataRequest);
@@ -40,7 +41,17 @@ public:
     CliprdrServerContextPtr clipContext = CliprdrServerContextPtr(nullptr, cliprdr_server_context_free);
 
     bool enabled = false;
-    const QMimeData *serverData = nullptr;
+    // mstsc drops a format list sent before its capabilities response; hold until markClientReady()
+    bool clientReady = false;
+    void markClientReady()
+    {
+        if (clientReady) {
+            return;
+        }
+        clientReady = true;
+        QMetaObject::invokeMethod(q, &Clipboard::sendServerData, Qt::QueuedConnection);
+    }
+    std::unique_ptr<const QMimeData> serverData;
     std::unique_ptr<QMimeData> clientData;
 
     template<typename>
@@ -63,6 +74,11 @@ public:
             qReturnArg(channelState),
             packet);
         return channelState;
+    }
+
+    static UINT clientCapabilities(CliprdrServerContext *context, const CLIPRDR_CAPABILITIES *capabilities)
+    {
+        return processInMainThread<&Private::onClientCapabilities>(reinterpret_cast<Clipboard *>(context->custom), capabilities);
     }
 
     static UINT clientFormatList(CliprdrServerContext *context, const CLIPRDR_FORMAT_LIST *formatList)
@@ -120,6 +136,7 @@ bool Clipboard::initialize()
     d->clipContext->custom = this;
     d->clipContext->rdpcontext = d->session->rdpPeer()->context;
 
+    d->clipContext->ClientCapabilities = Private::clientCapabilities;
     d->clipContext->ClientFormatList = Private::clientFormatList;
     d->clipContext->ClientFormatListResponse = Private::clientFormatListResponse;
     d->clipContext->ClientFormatDataRequest = Private::clientFormatDataRequest;
@@ -133,6 +150,8 @@ bool Clipboard::initialize()
     };
 
     d->enabled = true;
+    // flush a copy made before the cliprdr channel finished coming up, so it isn't silently lost
+    QMetaObject::invokeMethod(this, &Clipboard::sendServerData, Qt::QueuedConnection);
 
     return true;
 }
@@ -157,11 +176,7 @@ void Clipboard::close()
 
 void Clipboard::setServerData(const QMimeData *data)
 {
-    if (d->serverData) {
-        delete d->serverData;
-    }
-
-    d->serverData = data;
+    d->serverData.reset(data);
     QMetaObject::invokeMethod(this, &Clipboard::sendServerData, Qt::QueuedConnection);
 }
 
@@ -173,6 +188,10 @@ std::unique_ptr<QMimeData> Clipboard::getClipboard() const
 void Clipboard::sendServerData()
 {
     if (!d->serverData || !d->enabled) {
+        return;
+    }
+    // held until the client's init handshake completes; flushed from markClientReady()
+    if (!d->clientReady) {
         return;
     }
 
@@ -188,8 +207,18 @@ void Clipboard::sendServerData()
     d->clipContext->ServerFormatList(d->clipContext.get(), &formatList);
 }
 
+uint32_t Clipboard::Private::onClientCapabilities(const CLIPRDR_CAPABILITIES *)
+{
+    // covers copy-out with no prior copy-in: mstsc sends no format list when its clipboard starts empty
+    markClientReady();
+    return CHANNEL_RC_OK;
+}
+
 uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *formatList)
 {
+    // fallback readiness signal for clients that reach us with a format list first
+    markClientReady();
+
     for (uint32_t i = 0; i < formatList->numFormats; ++i) {
         auto format = formatList->formats[i];
 
@@ -218,6 +247,7 @@ uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *forma
 
 uint32_t Clipboard::Private::onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse)
 {
+    Q_UNUSED(formatListResponse);
     return CHANNEL_RC_OK;
 }
 
@@ -254,12 +284,13 @@ uint32_t Clipboard::Private::onClientFormatDataResponse(const CLIPRDR_FORMAT_DAT
         return CHANNEL_RC_OK;
     }
 
-    const auto nCharacters = formatDataResponse->common.dataLen / 2 - 1; // Each char16_t is 2 bytes, plus null terminator
-    if (nCharacters < 0) {
+    // dataLen is unsigned; guard before subtracting the null terminator or a short response underflows
+    if (formatDataResponse->common.dataLen < 2 || !formatDataResponse->requestedFormatData) {
         clientData.reset();
         Q_EMIT q->clientDataChanged();
-        return CHANNEL_RC_OK; // empty string
+        return CHANNEL_RC_OK; // empty or malformed
     }
+    const int nCharacters = int(formatDataResponse->common.dataLen / 2 - 1); // each char16_t is 2 bytes, plus null terminator
 
     clientData.reset(new QMimeData());
 

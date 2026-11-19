@@ -91,6 +91,15 @@ public:
     void setUsePAMAuthentication(bool usePAM);
 
     /**
+     * Whether clients can share folders with the session. They show up in
+     * `thinclient_drives` in the home directory.
+     *
+     * Enabled by default.
+     */
+    bool driveRedirectionEnabled() const;
+    void setDriveRedirectionEnabled(bool enabled);
+
+    /**
      * The path of a certificate file to use for encrypting communications.
      *
      * This is required to be set to a valid file, as the RDP login process only

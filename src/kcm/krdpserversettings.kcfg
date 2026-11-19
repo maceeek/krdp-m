@@ -39,6 +39,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Autostart the server on login</label>
       <default>false</default>
     </entry>
+    <entry name="DriveRedirection" type="Bool">
+      <label>Whether clients can share folders with the session</label>
+      <default>true</default>
+    </entry>
   </group>
   <group name="VirtualDisplay">
     <entry name="VirtualDisplayMode" type="Enum">

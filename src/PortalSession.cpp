@@ -5,7 +5,6 @@
 #include "PortalSession.h"
 
 #include <QGuiApplication>
-#include <QMimeData>
 #include <QMouseEvent>
 #include <QQueue>
 
@@ -13,7 +12,6 @@
 
 #include <KConfigGroup>
 #include <KSharedConfig>
-#include <KSystemClipboard>
 
 #include "PortalSession_p.h"
 #include "krdp_logging.h"
@@ -51,15 +49,37 @@ const QDBusArgument &operator>>(const QDBusArgument &arg, PortalSessionStream &s
     return arg;
 }
 
-void PortalRequest::onStarted(QDBusPendingCallWatcher *watcher)
+QString PortalRequest::requestPath(const QString &handleToken)
 {
-    QDBusPendingReply<QDBusObjectPath> reply = *watcher;
-    if (!reply.isError()) {
-        QDBusConnection::sessionBus().connect(QString{}, reply.value().path(), dbusRequestInterface, dbusResponse, this, SLOT(onFinished(uint, QVariantMap)));
-    } else {
-        m_callback(-1, {{QStringLiteral("errorMessage"), reply.error().message()}});
+    // The portal derives the request path from the caller's unique name, e.g. ":1.42" -> "1_42"
+    QString sender = QDBusConnection::sessionBus().baseService().mid(1);
+    sender.replace(u'.', u'_');
+    return QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, handleToken);
+}
+
+void PortalRequest::listen(const QString &path)
+{
+    if (!m_path.isEmpty()) {
+        QDBusConnection::sessionBus().disconnect(QString{}, m_path, dbusRequestInterface, dbusResponse, this, SLOT(onFinished(uint, QVariantMap)));
     }
-    watcher->deleteLater();
+    m_path = path;
+    QDBusConnection::sessionBus().connect(QString{}, m_path, dbusRequestInterface, dbusResponse, this, SLOT(onFinished(uint, QVariantMap)));
+}
+
+void PortalRequest::start(const QDBusPendingCall &call)
+{
+    QDBusPendingReply<QDBusObjectPath> reply = call;
+    reply.waitForFinished();
+    if (reply.isError()) {
+        m_callback(-1, {{QStringLiteral("errorMessage"), reply.error().message()}});
+        deleteLater();
+        return;
+    }
+
+    // Portals older than 0.9 don't derive the request path from the handle token
+    if (reply.value().path() != m_path) {
+        listen(reply.value().path());
+    }
 }
 
 void PortalRequest::onFinished(uint code, const QVariantMap &result)
@@ -77,8 +97,6 @@ public:
 
     std::unique_ptr<OrgFreedesktopPortalRemoteDesktopInterface> remoteInterface;
     std::unique_ptr<OrgFreedesktopPortalScreenCastInterface> screencastInterface;
-
-    bool ignoreNextSystemClipboardChange = false;
 
     QDBusObjectPath sessionPath;
 
@@ -108,37 +126,6 @@ PortalSession::PortalSession()
 {
     d->remoteInterface = std::make_unique<OrgFreedesktopPortalRemoteDesktopInterface>(dbusService, dbusPath, QDBusConnection::sessionBus());
     d->screencastInterface = std::make_unique<OrgFreedesktopPortalScreenCastInterface>(dbusService, dbusPath, QDBusConnection::sessionBus());
-
-    connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
-        if (mode != QClipboard::Clipboard) {
-            return;
-        }
-
-        auto data = KSystemClipboard::instance()->mimeData(mode);
-        if (!data) {
-            return;
-        }
-
-        qCDebug(KRDP) << "Clipboard formats:" << data->formats() << "hasText:" << data->hasText();
-
-        // KSystemClipboard takes ownership of any QMimeData passed to it but
-        // does not relinquish ownership over anything it returns. So manually
-        // copy over the contents to a new instance of QMimeData so we can keep
-        // the semantics the same.
-        //
-        // Only copy text data here. Fetching arbitrary clipboard MIME payloads
-        // can block for a long time on Wayland/XWayland targets such as
-        // SAVE_TARGETS, which freezes the server's main thread. The RDP
-        // clipboard implementation currently only exposes text anyway.
-        auto newData = new QMimeData();
-        if (data->hasText()) {
-            newData->setText(data->text());
-        } else {
-            qCDebug(KRDP) << "Ignoring non-text clipboard update with formats" << data->formats();
-        }
-
-        Q_EMIT clipboardDataChanged(newData);
-    });
 
     if (!d->remoteInterface->isValid() || !d->screencastInterface->isValid()) {
         qCWarning(KRDP) << "Could not connect to Freedesktop Remote Desktop Portal";
@@ -184,11 +171,13 @@ void PortalSession::start()
 {
     qCDebug(KRDP) << "Initializing Freedesktop Portal Session";
 
+    const QString handleToken = createHandleToken();
     auto parameters = QVariantMap{
-        {QStringLiteral("handle_token"), createHandleToken()},
+        {QStringLiteral("handle_token"), handleToken},
         {QStringLiteral("session_handle_token"), createHandleToken()},
     };
-    new PortalRequest(d->remoteInterface->CreateSession(parameters), this, &PortalSession::onCreateSession);
+    auto request = new PortalRequest(handleToken, this, &PortalSession::onCreateSession);
+    request->start(d->remoteInterface->CreateSession(parameters));
 }
 
 void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
@@ -316,16 +305,6 @@ void PortalSession::dispatchNextInputCall()
     }
 }
 
-void PortalSession::setClipboardData(std::unique_ptr<QMimeData> data)
-{
-    // KSystemClipboard takes ownership
-    if (data) {
-        KSystemClipboard::instance()->setMimeData(data.release(), QClipboard::Clipboard);
-    } else {
-        KSystemClipboard::instance()->clear(QClipboard::Clipboard);
-    }
-}
-
 void PortalSession::onCreateSession(uint code, const QVariantMap &result)
 {
     if (code != 0) {
@@ -338,9 +317,10 @@ void PortalSession::onCreateSession(uint code, const QVariantMap &result)
 
     static const uint PermissionsPersistUntilExplicitlyRevoked = 2;
 
+    const QString handleToken = createHandleToken();
     auto parameters = QVariantMap{
         {QStringLiteral("types"), 7u},
-        {QStringLiteral("handle_token"), createHandleToken()},
+        {QStringLiteral("handle_token"), handleToken},
         {QStringLiteral("persist_mode"), PermissionsPersistUntilExplicitlyRevoked},
     };
     // name is set explicitly as this is also used by the KCM
@@ -358,7 +338,8 @@ void PortalSession::onCreateSession(uint code, const QVariantMap &result)
         parameters[QStringLiteral("restore_token")] = restoreToken;
     }
 
-    new PortalRequest(d->remoteInterface->SelectDevices(d->sessionPath, parameters), this, &PortalSession::onDevicesSelected);
+    auto request = new PortalRequest(handleToken, this, &PortalSession::onDevicesSelected);
+    request->start(d->remoteInterface->SelectDevices(d->sessionPath, parameters));
 }
 
 void PortalSession::onDevicesSelected(uint code, const QVariantMap & /*result*/)
@@ -378,7 +359,10 @@ void PortalSession::onDevicesSelected(uint code, const QVariantMap & /*result*/)
     }
     parameters[QStringLiteral("cursor_mode")] = 4u; // Metadata
 
-    new PortalRequest(d->screencastInterface->SelectSources(d->sessionPath, parameters), this, &PortalSession::onSourcesSelected);
+    const QString handleToken = createHandleToken();
+    parameters[QStringLiteral("handle_token")] = handleToken;
+    auto request = new PortalRequest(handleToken, this, &PortalSession::onSourcesSelected);
+    request->start(d->screencastInterface->SelectSources(d->sessionPath, parameters));
 }
 
 void PortalSession::onSourcesSelected(uint code, const QVariantMap & /*result*/)
@@ -389,10 +373,12 @@ void PortalSession::onSourcesSelected(uint code, const QVariantMap & /*result*/)
         return;
     }
 
+    const QString handleToken = createHandleToken();
     auto parameters = QVariantMap{
-        {QStringLiteral("handle_token"), createHandleToken()},
+        {QStringLiteral("handle_token"), handleToken},
     };
-    new PortalRequest(d->remoteInterface->Start(d->sessionPath, QString{}, parameters), this, &PortalSession::onSessionStarted);
+    auto request = new PortalRequest(handleToken, this, &PortalSession::onSessionStarted);
+    request->start(d->remoteInterface->Start(d->sessionPath, QString{}, parameters));
 }
 
 void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
@@ -426,7 +412,7 @@ void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
             qCDebug(KRDP) << "Started Freedesktop Portal session";
 
             auto streamIndex = activeStream().value_or(0);
-            if (streamIndex >= streams.size()) {
+            if (streamIndex < 0 || streamIndex >= streams.size()) {
                 qCWarning(KRDP) << "Requested monitor index out of range, using first monitor";
                 setActiveStream(0);
                 streamIndex = 0;

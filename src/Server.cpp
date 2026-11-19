@@ -12,6 +12,7 @@
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
+#include "DriveFilesystem.h"
 #include "RdpConnection.h"
 
 #include "krdp_logging.h"
@@ -29,6 +30,7 @@ public:
 
     QList<User> users;
     bool usePamAuthentication = false;
+    bool driveRedirectionEnabled = true;
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
@@ -65,6 +67,11 @@ bool Server::start()
     // initializing a new peer. However, it seems to fail at actually creating a
     // global default instance. So create one here and use that.
     d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
+
+    if (d->driveRedirectionEnabled) {
+        // In case a previous server did not get to unmount its file system.
+        DriveFilesystem::cleanUpStaleMount(DriveFilesystem::defaultMountPoint());
+    }
 
     qCDebug(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
     return true;
@@ -133,6 +140,16 @@ void Server::setUsePAMAuthentication(bool usePAM)
     d->usePamAuthentication = usePAM;
 }
 
+bool Server::driveRedirectionEnabled() const
+{
+    return d->driveRedirectionEnabled;
+}
+
+void Server::setDriveRedirectionEnabled(bool enabled)
+{
+    d->driveRedirectionEnabled = enabled;
+}
+
 std::filesystem::path Server::tlsCertificate() const
 {
     return d->tlsCertificate;
@@ -165,15 +182,29 @@ void Server::incomingConnection(qintptr handle)
 {
     auto session = std::make_unique<RdpConnection>(this, handle);
     auto sessionPtr = session.get();
-    connect(sessionPtr, &RdpConnection::stateChanged, this, [this, sessionPtr](RdpConnection::State state) {
-        if (state == RdpConnection::State::Closed) {
-            auto itr = std::find_if(d->sessions.begin(), d->sessions.end(), [sessionPtr](auto &session) {
-                return session.get() == sessionPtr;
-            });
-            (*itr)->close();
-            d->sessions.erase(itr);
-        }
-    });
+    // Queued: the signal comes from the connection's run thread, and a queued delivery
+    // also keeps the erase below from destroying the sender mid-emission.
+    connect(
+        sessionPtr,
+        &RdpConnection::stateChanged,
+        this,
+        [this, sessionPtr](RdpConnection::State state) {
+            if (state == RdpConnection::State::Closed) {
+                auto itr = std::find_if(d->sessions.begin(), d->sessions.end(), [sessionPtr](auto &session) {
+                    return session.get() == sessionPtr;
+                });
+                // Closed can arrive after the session was already removed.
+                if (itr == d->sessions.end()) {
+                    return;
+                }
+                // Extract before erasing: ~RdpConnection can spin a nested event loop (KScreen
+                // operations run from destroyed() handlers), which may re-enter this vector.
+                // Destroy it only once the vector is consistent again.
+                auto session = std::move(*itr);
+                d->sessions.erase(itr);
+            }
+        },
+        Qt::QueuedConnection);
     d->sessions.push_back(std::move(session));
     Q_EMIT newConnectionCreated(sessionPtr);
 }

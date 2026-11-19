@@ -2,7 +2,9 @@
 #
 # Builds krdp with virtual display support from this repository and replaces
 # the krdp package of Arch Linux / CachyOS. Needs FreeRDP-M, install
-# freerdp-m-git from https://github.com/maceeek/freerdp-m first.
+# freerdp-m-git from https://github.com/maceeek/freerdp-m first. It has to be
+# recent enough to have the server drive API of FreeRDP 3.33, which drive
+# redirection uses.
 #
 #   cd packaging/archlinux && makepkg -si
 #
@@ -18,6 +20,7 @@ url='https://github.com/maceeek/krdp-m'
 license=(LGPL-2.0-or-later)
 depends=(ffmpeg
          freerdp-m-git
+         fuse3
          gcc-libs
          glibc
          kcmutils

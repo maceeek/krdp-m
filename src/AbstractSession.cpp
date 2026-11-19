@@ -5,6 +5,15 @@
 #include "AbstractSession.h"
 #include <unistd.h>
 
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QMetaMethod>
+#include <QMimeData>
+
+#include <KSystemClipboard>
+
+#include "krdp_logging.h"
+
 namespace KRdp
 {
 
@@ -24,12 +33,59 @@ AbstractSession::AbstractSession()
     : QObject()
     , d(std::make_unique<Private>())
 {
+    // Sessions are also created without a GUI application, by tests.
+    if (!qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        return;
+    }
+
+    connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
+        if (mode != QClipboard::Clipboard) {
+            return;
+        }
+        if (KSystemClipboard::instance()->ownsClipboard()) {
+            return;
+        }
+        // Only the session of the first monitor of a connection forwards the
+        // clipboard, and a session can outlive its connection. Nobody would
+        // take ownership of the data then.
+        if (!isSignalConnected(QMetaMethod::fromSignal(&AbstractSession::clipboardDataChanged))) {
+            return;
+        }
+
+        auto data = KSystemClipboard::instance()->mimeData(mode);
+        if (!data) {
+            return;
+        }
+
+        // text only, arbitrary MIME payloads can block on Wayland/XWayland targets (SAVE_TARGETS)
+        const QString text = data->hasText() ? data->text() : QString();
+        if (!data->hasText()) {
+            qCDebug(KRDP) << "Ignoring non-text clipboard update with formats" << data->formats();
+        }
+
+        // KSystemClipboard keeps ownership of what it returns, copy into a new QMimeData
+        auto newData = new QMimeData();
+        if (!text.isEmpty()) {
+            newData->setText(text);
+        }
+
+        Q_EMIT clipboardDataChanged(newData);
+    });
 }
 
 AbstractSession::~AbstractSession()
 {
     if (d->pipeWireFd >= 0) {
         close(d->pipeWireFd);
+    }
+}
+
+void AbstractSession::setClipboardData(std::unique_ptr<QMimeData> data)
+{
+    if (data) {
+        KSystemClipboard::instance()->setMimeData(data.release(), QClipboard::Clipboard);
+    } else {
+        KSystemClipboard::instance()->clear(QClipboard::Clipboard);
     }
 }
 

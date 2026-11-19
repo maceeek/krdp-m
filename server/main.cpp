@@ -111,6 +111,7 @@ int main(int argc, char **argv)
         {u"virtual-display"_s,
          u"How remote sessions use the displays: disabled (stream the physical monitors), extend (add a virtual monitor matching the client) or exclusive (only use a virtual monitor matching the client, physical monitors are turned off while connected)."_s,
          u"mode"_s},
+        {u"no-drive-redirection"_s, u"Do not let clients share folders with the session."_s},
         {u"return-displays"_s, u"Turn the physical monitors back on while a remote session uses them exclusively, then exit."_s},
         {u"restore-displays"_s, u"Restore the physical monitors if a previous instance did not exit cleanly, then exit."_s},
 #ifdef WITH_PLASMA_SESSION
@@ -154,6 +155,7 @@ int main(int argc, char **argv)
 
     server.setTlsCertificate(certificate);
     server.setTlsCertificateKey(certificateKey);
+    server.setDriveRedirectionEnabled(config->driveRedirection() && !parser.isSet(u"no-drive-redirection"_s));
 
     // Use parsed username/pw if set
     if (parser.isSet(u"username"_s)) {

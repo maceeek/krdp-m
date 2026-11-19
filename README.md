@@ -152,6 +152,56 @@ Settings. The log of krdpserver says `Encoding monitor 0 with AV1` when AV1 is
 used. Set `KRDP_DISABLE_AV1=1` in the environment of krdpserver to always use
 H.264, like `KRDP_DISABLE_NVENC` above.
 
+## Shared folders (drive redirection)
+
+Folders the client shares with the session show up in `~/thinclient_drives`,
+one directory per shared folder, the same place xrdp uses:
+
+```bash
+# FreeRDP: shows up as ~/thinclient_drives/documents
+sdl-freerdp3 /v:host /u:user /drive:documents,/home/me/Documents
+```
+
+In KRDC this is the "Share Media" setting of a connection, in the Remote
+Desktop Connection of Windows the drives selected under "Local Resources".
+
+The directory is a FUSE file system that is mounted when the first folder is
+shared and unmounted when the last client that shares one disconnects, so
+nothing is left behind in between. It is only accessible by the user running
+krdpserver. Files are read and written through the RDP connection, there is no
+cache: they are as fast as the connection, and gone when it is.
+
+Things to know:
+
+- Names are passed to the client as they are, apart from names that would lead
+  out of the shared folder, which are refused: `..`, and names containing `\`,
+  which is the path separator of the protocol. Files with such names on the
+  client are not shown.
+- Everything is a plain file or directory, owned by the user of the session.
+  Links on the client are followed by the client and can not be created,
+  permissions can not be changed, read-only files of the client are read-only.
+- The protocol has no way to mark a shared folder as read-only. What the
+  client refuses is reported as an error to the program that tried.
+- File locks only work between programs of the session, the client does not
+  know about them.
+- Listing a directory takes a round trip per entry, so large directories are
+  slow on connections with a high latency. Listings are cached for a few
+  seconds, changes made on the client take that long to show up.
+- Windows clients do not allow deleting or renaming a file that is still open.
+- Printers, smart cards and serial ports are not redirected.
+
+Set `DriveRedirection=false` in the `[General]` group of
+`~/.config/krdpserverrc`, uncheck "Shared folders" in System Settings or start
+krdpserver with `--no-drive-redirection` to turn this off:
+
+```bash
+kwriteconfig6 --file krdpserverrc --group General --key DriveRedirection false
+systemctl --user restart app-org.kde.krdpserver.service
+```
+
+Needs FUSE 3 (`fuse3`, with `fusermount3`), and a FreeRDP-M that has the server
+drive API of FreeRDP 3.33.
+
 ## Frame pacing and diagnostics
 
 A graphics surface waits for a key frame after it is created or reset. Resizing
@@ -320,8 +370,10 @@ it seems to not enable it.
 
 # Known Issues and Limitations
 
-- Only video streaming and remote input is supported.
-- Only the NLA security type of RDP is supported.
+- Only video streaming, remote input, the text clipboard and shared folders
+are supported.
+- Users from the user list have to log in with NLA, the system user (PAM) with
+TLS security.
 - Only one username and password combination is supported for login.
 - Only the "Graphics Pipeline" extension of the RDP protocol is
 implemented for video streaming. This extension allows using H.264 for video

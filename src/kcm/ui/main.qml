@@ -281,6 +281,19 @@ KCM.ScrollViewKCM {
             }
         }
 
+        QQC2.CheckBox {
+            Kirigami.FormData.label: i18nc("@label", "Shared folders:")
+            text: i18nc("@option:check", "Show folders shared by the client in thinclient_drives")
+            checked: settings.driveRedirection
+            onToggled: {
+                settings.driveRedirection = checked;
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "driveRedirection"
+            }
+        }
+
         Item {
             Kirigami.FormData.isSection: true
             Kirigami.FormData.label: i18nc("title:group Group of RDP server settings", "Displays")
