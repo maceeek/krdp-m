@@ -70,11 +70,30 @@ unset(CMAKE_REQUIRED_LIBRARIES)
 if (NOT FREERDP_M_FOUND)
     message(FATAL_ERROR "KRdp-M needs FreeRDP-M built with -DWITH_GFX_AV1=ON, see https://github.com/maceeek/freerdp-m")
 endif()
+# Drive redirection needs the server drive API with 64 bit offsets, file
+# information and volume information, which FreeRDP has since 3.33.
+set(CMAKE_REQUIRED_INCLUDES ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR} ${FreeRDP_Server_INCLUDE_DIR})
+unset(FREERDP_RDPDR_DRIVE_API_FOUND)
+unset(FREERDP_RDPDR_DRIVE_API_FOUND CACHE)
+check_cxx_source_compiles("
+#include <freerdp/server/rdpdr.h>
+int main() {
+    RdpdrServerContext context = {};
+    return context.DriveReadFileEx || context.DriveWriteFileEx || context.DriveRenameFileEx || context.DriveSetFileSize
+        || context.DriveSetFileTimes || context.DriveQueryVolumeInformation;
+}
+" FREERDP_RDPDR_DRIVE_API_FOUND)
+unset(CMAKE_REQUIRED_INCLUDES)
+if (NOT FREERDP_RDPDR_DRIVE_API_FOUND)
+    message(FATAL_ERROR "KRdp-M needs a FreeRDP-M with the server drive API of FreeRDP 3.33 for drive redirection, update freerdp-m-git")
+endif()
 find_package(KPipeWire 5.27.80 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Libxcvt REQUIRED IMPORTED_TARGET libxcvt)
 pkg_check_modules(FFmpeg REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
 add_feature_info(FFmpeg FFmpeg_FOUND "Hardware H.264 encoding with NVENC on NVIDIA GPUs")
+pkg_check_modules(Fuse3 REQUIRED IMPORTED_TARGET fuse3>=3.12)
+add_feature_info(Fuse3 Fuse3_FOUND "Folders shared by the client (drive redirection)")
 find_package(XKB REQUIRED)
 
 find_package(Qt6Keychain CONFIG)

@@ -25,10 +25,12 @@
 #include <freerdp/server/cliprdr.h>
 
 #include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/rdpdr.h>
 
 #include "Clipboard.h"
 #include "Cursor.h"
 #include "DisplayControl.h"
+#include "DriveRedirection.h"
 #include "InputHandler.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
@@ -256,6 +258,7 @@ public:
     std::unique_ptr<NetworkDetection> networkDetection;
     std::unique_ptr<Clipboard> clipboard;
     std::unique_ptr<DisplayControl> displayControl;
+    std::unique_ptr<DriveRedirection> driveRedirection;
 
     // Monitors the client asked for when connecting.
     // Written from the connection thread, read from the main thread.
@@ -303,6 +306,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     d->networkDetection = std::make_unique<NetworkDetection>(this);
     d->clipboard = std::make_unique<Clipboard>(this);
     d->displayControl = std::make_unique<DisplayControl>(this);
+    d->driveRedirection = std::make_unique<DriveRedirection>(this);
 
     QMetaObject::invokeMethod(this, &RdpConnection::initialize, Qt::QueuedConnection);
 }
@@ -383,6 +387,11 @@ KRdp::VideoStream *RdpConnection::videoStream() const
 DisplayControl *RdpConnection::displayControl() const
 {
     return d->displayControl.get();
+}
+
+DriveRedirection *RdpConnection::driveRedirection() const
+{
+    return d->driveRedirection.get();
 }
 
 MonitorLayout RdpConnection::clientMonitorLayout() const
@@ -627,6 +636,12 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
+        if (d->peer->connected && d->state == State::Activated && d->server->driveRedirectionEnabled()
+            && WTSVirtualChannelManagerIsChannelJoined(context->virtualChannelManager, RDPDR_SVC_CHANNEL_NAME)) {
+            // Not fatal, without it the client just can't share its folders.
+            d->driveRedirection->initialize();
+        }
+
         if (drdynvcJoined != lastDrdynvcJoined || drdynvcState != lastDrdynvcState) {
             lastDrdynvcJoined = drdynvcJoined;
             lastDrdynvcState = drdynvcState;
@@ -749,6 +764,7 @@ bool RdpConnection::onPostConnect()
 bool RdpConnection::onClose()
 {
     d->clipboard->close();
+    d->driveRedirection->close();
     d->displayControl->close();
     d->videoStream->close();
     setState(State::Closed);

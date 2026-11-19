@@ -45,3 +45,12 @@ target_link_libraries(videostreamsizetest PRIVATE Qt6::Test KRdp)
 # without connecting to the user's PipeWire daemon or requiring a GPU.
 set_target_properties(videostreamsizetest PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME videostreamsizetest COMMAND videostreamsizetest)
+
+add_executable(driveutilstest driveutilstest.cpp)
+target_link_libraries(driveutilstest PRIVATE Qt6::Test KRdp)
+add_test(NAME driveutilstest COMMAND driveutilstest)
+
+# Mounts a FUSE file system in a temporary directory, skipped where that is not possible.
+add_executable(drivefilesystemtest drivefilesystemtest.cpp)
+target_link_libraries(drivefilesystemtest PRIVATE Qt6::Test KRdp)
+add_test(NAME drivefilesystemtest COMMAND drivefilesystemtest)

@@ -12,6 +12,7 @@
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
+#include "DriveFilesystem.h"
 #include "RdpConnection.h"
 
 #include "krdp_logging.h"
@@ -29,6 +30,7 @@ public:
 
     QList<User> users;
     bool usePamAuthentication = false;
+    bool driveRedirectionEnabled = true;
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
@@ -65,6 +67,11 @@ bool Server::start()
     // initializing a new peer. However, it seems to fail at actually creating a
     // global default instance. So create one here and use that.
     d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
+
+    if (d->driveRedirectionEnabled) {
+        // In case a previous server did not get to unmount its file system.
+        DriveFilesystem::cleanUpStaleMount(DriveFilesystem::defaultMountPoint());
+    }
 
     qCDebug(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
     return true;
@@ -131,6 +138,16 @@ bool Server::usePAMAuthentication() const
 void Server::setUsePAMAuthentication(bool usePAM)
 {
     d->usePamAuthentication = usePAM;
+}
+
+bool Server::driveRedirectionEnabled() const
+{
+    return d->driveRedirectionEnabled;
+}
+
+void Server::setDriveRedirectionEnabled(bool enabled)
+{
+    d->driveRedirectionEnabled = enabled;
 }
 
 std::filesystem::path Server::tlsCertificate() const
